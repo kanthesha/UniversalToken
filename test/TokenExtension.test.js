@@ -1,4 +1,4 @@
-const { expectRevert } = require("@openzeppelin/test-helpers");
+const { expectRevert, time } = require("@openzeppelin/test-helpers");
 const { soliditySha3 } = require("web3-utils");
 const { advanceTimeAndBlock } = require("./utils/time");
 const { newSecretHashPair, newHoldId } = require("./utils/crypto");
@@ -85,17 +85,8 @@ const ESC_56 = "0x56"; // 0x56	invalid sender
 const ESC_57 = "0x57"; // 0x57	invalid receiver
 const ESC_58 = "0x58"; // 0x58	invalid operator (transfer agent)
 
-const HOLD_STATUS_NON_EXISTENT = 0;
-const HOLD_STATUS_ORDERED = 1;
-const HOLD_STATUS_EXECUTED = 2;
-const HOLD_STATUS_EXECUTED_AND_KEPT_OPEN = 3;
-const HOLD_STATUS_RELEASED_BY_NOTARY = 4;
-const HOLD_STATUS_RELEASED_BY_PAYEE = 5;
-const HOLD_STATUS_RELEASED_ON_EXPIRATION = 6;
-
 const issuanceAmount = 1000;
 const holdAmount = 600;
-const smallHoldAmount = 400;
 
 const SECONDS_IN_AN_HOUR = 3600;
 const SECONDS_IN_A_DAY = 24*SECONDS_IN_AN_HOUR;
@@ -291,6 +282,78 @@ const setBlockListActivated = async (
     tokenSetup[3],
     tokenSetup[4],
     tokenSetup[5],
+    { from: _sender }
+  );
+}
+
+const assertTokensLimitActivated = async (
+  _extension,
+  _token,
+  _expectedValue
+) => {
+  const customExtensionSetup = await _extension.retrieveCustomExtensionSetup(_token.address);
+  assert.equal(_expectedValue, customExtensionSetup[0]);
+}
+
+const setTokensLimitActivated = async (
+  _extension,
+  _token,
+  _sender,
+  _value
+) => {
+  const tokenSetup = await _extension.retrieveTokenSetup(_token.address);
+  const tokensLimitSetup = await _extension.retrieveCustomExtensionSetup(_token.address);
+  await _extension.registerTokenSetup(
+    _token.address,
+    tokenSetup[0],
+    tokenSetup[1],
+    tokenSetup[2],
+    tokenSetup[3],
+    tokenSetup[4],
+    tokenSetup[5],
+    { from: _sender }
+  );
+
+  await _extension.registerCustomExtensionSetup(
+    _token.address,
+    _value,
+    tokensLimitSetup[1],
+    { from: _sender }
+  );
+}
+
+const assertAccountLimitActivated = async (
+  _extension,
+  _token,
+  _expectedValue
+) => {
+  const customExtensionSetup = await _extension.retrieveCustomExtensionSetup(_token.address);
+  assert.equal(_expectedValue, customExtensionSetup[1]);
+}
+
+const setAccountLimitActivated = async (
+  _extension,
+  _token,
+  _sender,
+  _value
+) => {
+  const tokenSetup = await _extension.retrieveTokenSetup(_token.address);
+  const tokensLimitSetup = await _extension.retrieveCustomExtensionSetup(_token.address);
+  await _extension.registerTokenSetup(
+    _token.address,
+    tokenSetup[0],
+    tokenSetup[1],
+    tokenSetup[2],
+    tokenSetup[3],
+    tokenSetup[4],
+    tokenSetup[5],
+    { from: _sender }
+  );
+
+  await _extension.registerCustomExtensionSetup(
+    _token.address,
+    tokensLimitSetup[0],
+    _value,
     { from: _sender }
   );
 }
@@ -1750,6 +1813,531 @@ contract("ERC1400HoldableCertificate with token extension", function ([
     });
   });
 
+  /// TRANSACTION LIMIT EXTENSION
+  describe("tokens transaction limit", function () {
+    const transactionLimit = 10;
+    beforeEach(async function () {
+      await this.extension.addTokenLimitAdmin(this.token.address, controller, {
+        from: owner,
+      });
+
+      const certificate = await craftCertificate(
+        this.token.contract.methods.issueByPartition(
+          partition1,
+          tokenHolder,
+          issuanceAmount,
+          EMPTY_CERTIFICATE,
+        ).encodeABI(),
+        this.token,
+        this.extension,
+        this.clock, // this.clock
+        controller
+      );
+
+      await this.token.issueByPartition(
+        partition1,
+        tokenHolder,
+        issuanceAmount,
+        certificate,
+        { from: controller }
+      );
+
+      await setAllowListActivated(
+        this.extension,
+        this.token,
+        controller,
+        false
+      );
+      await assertAllowListActivated(
+        this.extension,
+        this.token,
+        false
+      );
+
+      await setBlockListActivated(
+        this.extension,
+        this.token,
+        controller,
+        false
+      )
+      await assertBlockListActivated(
+        this.extension,
+        this.token,
+        false
+      );
+
+      await setTokensLimitActivated(
+        this.extension,
+        this.token,
+        controller,
+        true
+      )
+      await assertTokensLimitActivated(
+        this.extension,
+        this.token,
+        true
+      );
+    });
+
+    describe("add tokens transaction limit", function () {
+      beforeEach(async function () {
+        await this.extension.addTransactionLimit(this.token.address, tokenHolder, transactionLimit, {
+          from: controller,
+        });
+        const maxTransactionLimit = await this.extension.getTransactionLimit(this.token.address, tokenHolder);
+        assert.equal(transactionLimit, maxTransactionLimit);
+      });
+
+      it("transfer the requested amount, when amount is less than transaction limit", async function () {
+        await this.token.transfer(recipient, transactionLimit, { from: tokenHolder });
+        await assertBalance(this.token, tokenHolder, issuanceAmount - transactionLimit);
+        await assertBalance(this.token, recipient, transactionLimit);
+      });
+
+      it("revert the transfer amount, when requested amount is more than transaction limit", async function () {
+        await expectRevert.unspecified(
+          this.token.transfer(recipient, (transactionLimit + 1), { from: tokenHolder })
+        );
+        await assertBalance(this.token, tokenHolder, issuanceAmount);
+        await assertBalance(this.token, recipient, 0);
+      });
+    });
+
+    describe("remove tokens transaction limit", function () {
+      beforeEach(async function () {
+        await this.extension.removeTransactionLimit(this.token.address, tokenHolder, {
+          from: controller,
+        });
+        const maxTransLimit = await this.extension.getTransactionLimit(this.token.address, tokenHolder);
+        assert.equal(0, maxTransLimit);
+      });
+
+      it("transfer the transaction limit plus one, when transaction limit is removed", async function () {
+        const limitPlusOne = transactionLimit + 1;
+        await this.token.transfer(recipient, limitPlusOne, { from: tokenHolder });
+        await assertBalance(this.token, tokenHolder, issuanceAmount - limitPlusOne);
+        await assertBalance(this.token, recipient, limitPlusOne);
+      });
+    });
+  });
+
+  describe("tokens limit admin", function () {
+    it("add admin to the token contract and verify admin mapped to the token", async function () {
+      await this.extension.addTokenLimitAdmin(this.token.address, tokenHolder, {
+        from: controller,
+      });
+      const isAdmin = await this.extension.isTokenLimitAdmin(this.token.address, tokenHolder);
+      assert.equal(true, isAdmin);
+    });
+
+    it("remove admin from the token contract and verify admin is renounced from the token", async function () {
+      await this.extension.addTokenLimitAdmin(this.token.address, tokenHolder, {
+        from: controller,
+      });
+      const isAdmin = await this.extension.isTokenLimitAdmin(this.token.address, tokenHolder);
+      assert.equal(true, isAdmin);
+
+      await this.extension.renounceTokenLimitAdmin(this.token.address, tokenHolder, {
+        from: controller,
+      });
+      const isTokensAdmin = await this.extension.isTokenLimitAdmin(this.token.address, tokenHolder);
+      assert.equal(false, isTokensAdmin);
+    });
+  });
+
+  /// ACCOUNT LIMIT EXTENSION
+  describe("tokens account limit", function () {
+    const accountLimit = 10;
+    beforeEach(async function () {
+      await this.extension.addTokenLimitAdmin(this.token.address, controller, {
+        from: owner,
+      });
+
+      const certificate = await craftCertificate(
+        this.token.contract.methods.issueByPartition(
+          partition1,
+          tokenHolder,
+          issuanceAmount,
+          EMPTY_CERTIFICATE,
+        ).encodeABI(),
+        this.token,
+        this.extension,
+        this.clock, // this.clock
+        controller
+      );
+      await this.token.issueByPartition(
+        partition1,
+        tokenHolder,
+        issuanceAmount,
+        certificate,
+        { from: controller }
+      );
+
+      await setAllowListActivated(
+        this.extension,
+        this.token,
+        controller,
+        false
+      )
+      await assertAllowListActivated(
+        this.extension,
+        this.token,
+        false
+      );
+
+      await setBlockListActivated(
+        this.extension,
+        this.token,
+        controller,
+        false
+      )
+      await assertBlockListActivated(
+        this.extension,
+        this.token,
+        false
+      );
+
+      await setAccountLimitActivated(
+        this.extension,
+        this.token,
+        controller,
+        true
+      );
+
+      await assertAccountLimitActivated(
+        this.extension,
+        this.token,
+        true
+      );
+    });
+
+    describe("add tokens account limit", function () {
+      beforeEach(async function () {
+        await this.extension.addAccountLimit(this.token.address, recipient, accountLimit, {
+          from: controller,
+        });
+        const maxAccountLimit = await this.extension.getMaxAccountBalane(this.token.address, recipient);
+        assert.equal(accountLimit, maxAccountLimit);
+      });
+
+      it("transfer the requested amount, when amount is less than account limit", async function () {
+        await this.token.transfer(recipient, 5, { from: tokenHolder });
+        await this.token.transfer(recipient, 5, { from: tokenHolder });
+        await assertBalance(this.token, tokenHolder, issuanceAmount - 10);
+        await assertBalance(this.token, recipient, 10);
+      });
+
+      it("revert the transfer amount, when requested amount is more than account limit", async function () {
+        await this.token.transfer(recipient, 5, { from: tokenHolder });
+        await this.token.transfer(recipient, 5, { from: tokenHolder });
+        await expectRevert.unspecified(
+          this.token.transfer(recipient, 2, { from: tokenHolder })
+        );
+        await assertBalance(this.token, tokenHolder, issuanceAmount - 10);
+        await assertBalance(this.token, recipient, 10);
+      });
+    });
+
+    describe("remove tokens account limit", function () {
+      beforeEach(async function () {
+        await this.extension.removeAccountLimit(this.token.address, recipient, {
+          from: controller,
+        });
+        const maxAccountLimit = await this.extension.getMaxAccountBalane(this.token.address, recipient);
+        assert.equal(0, maxAccountLimit);
+      });
+
+      it("transfer the account limit plus one, when account limit is removed", async function () {
+        await this.token.transfer(recipient, 5, { from: tokenHolder });
+        await this.token.transfer(recipient, 6, { from: tokenHolder });
+        assert.isAbove((5 + 6), accountLimit);
+        await assertBalance(this.token, tokenHolder, issuanceAmount - 11);
+        await assertBalance(this.token, recipient, 11);
+      });
+    });
+  });
+
+  // PARTITION EXPIRY
+  describe("partition-expiry", function () {
+    beforeEach(async function () {
+      const time = parseInt(await this.clock.getTime());
+      this.validTimestamp = time+SECONDS_IN_AN_HOUR;
+      this.invalidTimestamp = time-1;
+
+      const certificate = await craftCertificate(
+        this.token.contract.methods.issueByPartition(
+          partition1,
+          tokenHolder,
+          issuanceAmount,
+          EMPTY_CERTIFICATE,
+        ).encodeABI(),
+        this.token,
+        this.extension,
+        this.clock, // this.clock
+        controller
+      );
+
+      // await setCertificateActivated(
+      //   this.extension,
+      //   this.token,
+      //   controller,
+      //   CERTIFICATE_VALIDATION_NONE
+      // )
+      // await assertCertificateActivated(
+      //   this.extension,
+      //   this.token,
+      //   CERTIFICATE_VALIDATION_NONE
+      // );
+      await this.token.issueByPartition(
+        partition1,
+        tokenHolder,
+        issuanceAmount,
+        certificate,
+        { from: controller }
+      );
+      await assertIsTokenController(
+        this.extension,
+        this.token,
+        tokenController1,
+        false,
+      );
+      await addTokenController(
+        this.extension,
+        this.token,
+        controller,
+        tokenController1
+      );
+      await assertIsTokenController(
+        this.extension,
+        this.token,
+        tokenController1,
+        true,
+      );
+    });
+ 
+    describe("when a partition has no expiry set", function () {
+      it("returns false when getting the expiry activation status", async function () {
+        const partitionExpiryActivated = await this.extension.getPartitionExpiryActivated(this.token.address, partition1);
+        assert.equal(partitionExpiryActivated, false);
+      });
+      it("reverts when getting the expiry status", async function () {
+        await expectRevert.unspecified(this.extension.getPartitionExpiryStatus(this.token.address, partition1));
+      });
+      it("reverts when getting the expiry timestamp", async function () {
+        await expectRevert.unspecified(this.extension.getPartitionExpiryTimestamp(this.token.address, partition1));
+      });
+      describe("can still call transferByPartition", async function () {
+        const transferAmount = 300;
+        it.skip("transfers the requested amount", async function () {
+          await setCertificateActivated(
+            this.extension,
+            this.token,
+            controller,
+            CERTIFICATE_VALIDATION_NONE
+          )
+          await assertCertificateActivated(
+            this.extension,
+            this.token,
+            CERTIFICATE_VALIDATION_NONE
+          );
+          await assertBalanceOf(
+            this.token,
+            tokenHolder,
+            partition1,
+            issuanceAmount
+          );
+          await assertBalanceOf(this.token, recipient, partition1, 0);
+
+          await this.token.transferByPartition(
+            partition1,
+            recipient,
+            transferAmount,
+            EMPTY_CERTIFICATE,
+            { from: tokenHolder }
+          );
+
+          await assertBalanceOf(
+            this.token,
+            tokenHolder,
+            partition1,
+            issuanceAmount - transferAmount
+          );
+          await assertBalanceOf(
+            this.token,
+            recipient,
+            partition1,
+            transferAmount
+          );
+        });
+      });
+      describe("only controllers can set an expiry timestamp", function () {
+        it("allows controllers to set a valid expiry timestamp", async function () {
+          const logs = await this.extension.setPartitionExpiryTimestamp(this.token.address, partition1, this.validTimestamp, { from: tokenController1 });
+          const expiryActivated = await this.extension.getPartitionExpiryActivated(this.token.address, partition1);
+          assert.equal(expiryActivated, true);
+        });
+        it("returns activated when a controller has set a valid expiry timestamp", async function () {
+          const logs = await this.extension.setPartitionExpiryTimestamp(this.token.address, partition1, this.validTimestamp, { from: tokenController1 });
+          const expiryActivated = await this.extension.getPartitionExpiryActivated(this.token.address, partition1);
+          assert.equal(expiryActivated, true);
+        });
+        it("returns the expiry timestamp when a controller has set a valid expiry timestamp", async function () {
+          const logs = await this.extension.setPartitionExpiryTimestamp(this.token.address, partition1, this.validTimestamp, { from: tokenController1 });
+          const expiryTimestamp = await this.extension.getPartitionExpiryTimestamp(this.token.address, partition1);
+          assert.equal(expiryTimestamp, this.validTimestamp);
+        });
+        it("reverts when controllers set an invalid expiry timestamp", async function () {
+          await expectRevert.unspecified(this.extension.setPartitionExpiryTimestamp(this.token.address, partition1, this.invalidTimestamp, { from: tokenController1 }));
+        });
+        it("reverts when partition expiry is already activated", async function () {
+          const logs = await this.extension.setPartitionExpiryTimestamp(this.token.address, partition1, this.validTimestamp, { from: tokenController1 });
+          await expectRevert.unspecified(this.extension.setPartitionExpiryTimestamp(this.token.address, partition1, this.invalidTimestamp, { from: tokenController1 }));
+        });
+        it("reverts when non-controllers set a expiry timestamp", async function () {
+          await expectRevert.unspecified(this.extension.setPartitionExpiryTimestamp(this.token.address, partition1, this.invalidTimestamp, {from: unknown }));
+        });
+      });
+    });
+ 
+    describe("when a partition has an expiry set", function () {
+      beforeEach(async function () {
+       await this.extension.setPartitionExpiryTimestamp(this.token.address, partition1, this.validTimestamp, { from: tokenController1 })
+      });
+ 
+     describe("when the partition has not expired", function () {
+       it("returns true when getting the expiry activation status", async function () {
+         const partitionExpiryActivated = await this.extension.getPartitionExpiryActivated(this.token.address, partition1);
+         assert.equal(partitionExpiryActivated, true);
+       });
+       it("returns false when getting the expiry status", async function () {
+         const partitionExpiryStatus = await this.extension.getPartitionExpiryStatus(this.token.address, partition1);
+         assert.equal(partitionExpiryStatus, false);
+       });
+       it("returns the expiry time when getting the expirty timestamp", async function () {
+         const partitionExpiryTimestamp = await this.extension.getPartitionExpiryTimestamp(this.token.address, partition1);
+         assert.equal(partitionExpiryTimestamp, this.validTimestamp);
+       });
+       describe("can still call transferByPartition", async function () {
+         const transferAmount = 300;
+        //  const certificate = await craftCertificate(
+        //   this.token.contract.methods.issueByPartition(
+        //     partition1,
+        //     tokenHolder,
+        //     issuanceAmount,
+        //     EMPTY_CERTIFICATE,
+        //   ).encodeABI(),
+        //   this.token,
+        //   this.extension,
+        //   this.clock, // this.clock
+        //   controller
+        // );
+         it.skip("transfers the requested amount", async function () {
+          await setCertificateActivated(
+            this.extension,
+            this.token,
+            controller,
+            CERTIFICATE_VALIDATION_NONE
+          )
+          await assertCertificateActivated(
+            this.extension,
+            this.token,
+            CERTIFICATE_VALIDATION_NONE
+          );
+           await assertBalanceOf(
+             this.token,
+             tokenHolder,
+             partition1,
+             issuanceAmount
+           );
+           await assertBalanceOf(this.token, recipient, partition1, 0);
+ 
+           await this.token.transferByPartition(
+             partition1,
+             recipient,
+             transferAmount,
+             EMPTY_CERTIFICATE,
+             { from: tokenHolder }
+           );
+ 
+           await assertBalanceOf(
+             this.token,
+             tokenHolder,
+             partition1,
+             issuanceAmount - transferAmount
+           );
+           await assertBalanceOf(
+             this.token,
+             recipient,
+             partition1,
+             transferAmount
+           );
+         });
+       });
+     });
+ 
+     describe("when the partition has expired", function () {
+       beforeEach(async function () {
+         await time.increaseTo(this.validTimestamp+1)
+       });
+       it("returns true when getting the expiry activation status", async function () {
+         const partitionExpiryActivated = await this.extension.getPartitionExpiryActivated(this.token.address, partition1);
+         assert.equal(partitionExpiryActivated, true);
+       });
+       it("returns true when getting the expiry status", async function () {
+         const partitionExpiryStatus = await this.extension.getPartitionExpiryStatus(this.token.address, partition1);
+         assert.equal(partitionExpiryStatus, true);
+       });
+       it("returns the expiry time when getting the expirty timestamp", async function () {
+         const partitionExpiryTimestamp = await this.extension.getPartitionExpiryTimestamp(this.token.address, partition1);
+         assert.equal(partitionExpiryTimestamp, this.validTimestamp);
+       });
+       describe("prevents transferByPartition", async function () {
+         const transferAmount = 300;
+        //  const certificate = await craftCertificate(
+        //   this.token.contract.methods.issueByPartition(
+        //     partition1,
+        //     tokenHolder,
+        //     issuanceAmount,
+        //     EMPTY_CERTIFICATE,
+        //   ).encodeABI(),
+        //   this.token,
+        //   this.extension,
+        //   this.clock, // this.clock
+        //   controller
+        // );
+         it("reverts when transfering the requested amount", async function () {
+          await setCertificateActivated(
+            this.extension,
+            this.token,
+            controller,
+            CERTIFICATE_VALIDATION_NONE
+          )
+          await assertCertificateActivated(
+            this.extension,
+            this.token,
+            CERTIFICATE_VALIDATION_NONE
+          );
+           await assertBalanceOf(
+             this.token,
+             tokenHolder,
+             partition1,
+             issuanceAmount
+           );
+           await assertBalanceOf(this.token, recipient, partition1, 0);
+ 
+           await expectRevert.unspecified(this.token.transferByPartition(
+             partition1,
+             recipient,
+             transferAmount,
+             EMPTY_CERTIFICATE,
+             { from: tokenHolder }
+           ));
+         });
+       });
+     });
+   });
+   });
+
   // PARTITION GRANULARITY ACTIVATED
   describe("setPartitionGranularityActivated", function () {
     beforeEach(async function () {
@@ -2020,69 +2608,6 @@ contract("ERC1400HoldableCertificate with token extension", function ([
                         partition1
                       );
                     });
-                  });
-                });
-                describe("when validator is not ok", function () {
-                  it("returns Ethereum status code 54 (canTransferByPartition)", async function () {
-                    const holdId = newHoldId();
-                    const secretHashPair = newSecretHashPair();  
-                    const certificate = await craftCertificate(
-                      this.extension.contract.methods.holdFrom(
-                        this.token2.address,
-                        holdId,
-                        tokenHolder,
-                        recipient,
-                        notary,
-                        partition1,
-                        issuanceAmount,
-                        SECONDS_IN_AN_HOUR,
-                        secretHashPair.hash,
-                        EMPTY_CERTIFICATE,
-                      ).encodeABI(),
-                      this.token2,
-                      this.extension,
-                      this.clock, // this.clock
-                      controller
-                    )
-                    await this.extension.holdFrom(
-                      this.token2.address,
-                      holdId,
-                      tokenHolder,
-                      recipient,
-                      notary,
-                      partition1,
-                      issuanceAmount,
-                      SECONDS_IN_AN_HOUR,
-                      secretHashPair.hash,
-                      certificate,
-                      { from: controller }
-                    )
-                    
-                    const certificate2 = await craftCertificate(
-                      this.token2.contract.methods.transferByPartition(
-                        partition1,
-                        recipient,
-                        transferAmount,
-                        EMPTY_CERTIFICATE,
-                      ).encodeABI(),
-                      this.token2,
-                      this.extension,
-                      this.clock, // this.clock
-                      tokenHolder
-                    )
-                    const response = await this.token2.canTransferByPartition(
-                      partition1,
-                      recipient,
-                      transferAmount,
-                      certificate2,
-                      { from: tokenHolder }
-                    );
-                    await assertEscResponse(
-                      response,
-                      ESC_54,
-                      EMPTY_BYTE32,
-                      partition1
-                    );
                   });
                 });
               });
@@ -5418,274 +5943,6 @@ contract("ERC1400HoldableCertificate with token extension", function ([
         });
       });
     });
-    // describe("when token has no allowlist", function () {});
-    describe("when token holds are activated", function () {
-      beforeEach(async function () {
-        await assertHoldsActivated(
-          this.extension,
-          this.token,
-          true
-        );
-
-        // Add notary as controller
-        const controllers = await this.token.controllers();
-        assert.equal(controllers.length, 1);
-        controllers.push(notary);
-        await this.token.setControllers(controllers, { from: owner });
-
-        // Create hold in state Ordered
-        this.time = await this.clock.getTime();
-        this.holdId = newHoldId();
-        this.secretHashPair = newSecretHashPair();
-        const certificate2 = await craftCertificate(
-          this.extension.contract.methods.hold(
-            this.token.address,
-            this.holdId,
-            recipient,
-            notary,
-            partition1,
-            smallHoldAmount,
-            SECONDS_IN_AN_HOUR,
-            this.secretHashPair.hash,
-            EMPTY_CERTIFICATE,
-          ).encodeABI(),
-          this.token,
-          this.extension,
-          this.clock, // this.clock
-          tokenHolder
-        )
-        await this.extension.hold(
-          this.token.address,
-          this.holdId,
-          recipient,
-          notary,
-          partition1,
-          smallHoldAmount,
-          SECONDS_IN_AN_HOUR,
-          this.secretHashPair.hash,
-          certificate2,
-          { from: tokenHolder }
-        )
-      });
-      describe("when a hold is executed", function () {
-        it("executes the hold", async function() {
-          const initialBalance = await this.token.balanceOf(tokenHolder)
-          const initialPartitionBalance = await this.token.balanceOfByPartition(partition1, tokenHolder)
-  
-          const initialBalanceOnHold = await this.extension.balanceOnHold(this.token.address, tokenHolder)
-          const initialBalanceOnHoldByPartition = await this.extension.balanceOnHoldByPartition(this.token.address, partition1, tokenHolder)
-  
-          const initialSpendableBalance = await this.extension.spendableBalanceOf(this.token.address, tokenHolder)
-          const initialSpendableBalanceByPartition = await this.extension.spendableBalanceOfByPartition(this.token.address, partition1, tokenHolder)
-  
-          const initialTotalSupplyOnHold = await this.extension.totalSupplyOnHold(this.token.address)
-          const initialTotalSupplyOnHoldByPartition = await this.extension.totalSupplyOnHoldByPartition(this.token.address, partition1)
-  
-          const initialRecipientBalance = await this.token.balanceOf(recipient)
-          const initialRecipientPartitionBalance = await this.token.balanceOfByPartition(partition1, recipient)
-  
-          await this.token.transferFrom(
-            tokenHolder,
-            recipient,
-            smallHoldAmount,
-            { from: notary }
-          )
-  
-          const finalBalance = await this.token.balanceOf(tokenHolder)
-          const finalPartitionBalance = await this.token.balanceOfByPartition(partition1, tokenHolder)
-  
-          const finalBalanceOnHold = await this.extension.balanceOnHold(this.token.address, tokenHolder)
-          const finalBalanceOnHoldByPartition = await this.extension.balanceOnHoldByPartition(this.token.address, partition1, tokenHolder)
-  
-          const finalSpendableBalance = await this.extension.spendableBalanceOf(this.token.address, tokenHolder)
-          const finalSpendableBalanceByPartition = await this.extension.spendableBalanceOfByPartition(this.token.address, partition1, tokenHolder)
-  
-          const finalTotalSupplyOnHold = await this.extension.totalSupplyOnHold(this.token.address)
-          const finalTotalSupplyOnHoldByPartition = await this.extension.totalSupplyOnHoldByPartition(this.token.address, partition1)
-  
-          const finalRecipientBalance = await this.token.balanceOf(recipient)
-          const finalRecipientPartitionBalance = await this.token.balanceOfByPartition(partition1, recipient)
-  
-          assert.equal(initialBalance, issuanceAmount)
-          assert.equal(finalBalance, issuanceAmount-smallHoldAmount)
-          assert.equal(initialPartitionBalance, issuanceAmount)
-          assert.equal(finalPartitionBalance, issuanceAmount-smallHoldAmount)
-  
-          assert.equal(initialBalanceOnHold, smallHoldAmount)
-          assert.equal(initialBalanceOnHoldByPartition, smallHoldAmount)
-          assert.equal(finalBalanceOnHold, 0)
-          assert.equal(finalBalanceOnHoldByPartition, 0)
-  
-          assert.equal(initialSpendableBalance, issuanceAmount-smallHoldAmount)
-          assert.equal(initialSpendableBalanceByPartition, issuanceAmount-smallHoldAmount)
-          assert.equal(finalSpendableBalance, issuanceAmount-smallHoldAmount)
-          assert.equal(finalSpendableBalanceByPartition, issuanceAmount-smallHoldAmount)
-  
-          assert.equal(initialTotalSupplyOnHold, smallHoldAmount)
-          assert.equal(initialTotalSupplyOnHoldByPartition, smallHoldAmount)
-          assert.equal(finalTotalSupplyOnHold, 0)
-          assert.equal(finalTotalSupplyOnHoldByPartition, 0)
-  
-          assert.equal(initialRecipientBalance, 0)
-          assert.equal(initialRecipientPartitionBalance, 0)
-          assert.equal(finalRecipientBalance, smallHoldAmount)
-          assert.equal(finalRecipientPartitionBalance, smallHoldAmount)
-  
-          this.holdData = await this.extension.retrieveHoldData(this.token.address, this.holdId);
-          assert.equal(this.holdData[0], partition1);
-          assert.equal(this.holdData[1], tokenHolder);
-          assert.equal(this.holdData[2], recipient);
-          assert.equal(this.holdData[3], notary);
-          assert.equal(parseInt(this.holdData[4]), smallHoldAmount);
-          assert.isAtLeast(parseInt(this.holdData[5]), parseInt(this.time)+SECONDS_IN_AN_HOUR);
-          assert.isBelow(parseInt(this.holdData[5]), parseInt(this.time)+SECONDS_IN_AN_HOUR+100);
-          assert.equal(this.holdData[6], this.secretHashPair.hash);
-          assert.equal(this.holdData[7], EMPTY_BYTE32);
-          assert.equal(parseInt(this.holdData[8]), HOLD_STATUS_EXECUTED);
-        });
-        it("executes 2 holds", async function() {
-          // Create a second hold in state Ordered
-          this.time2 = await this.clock.getTime();
-          this.holdId2 = newHoldId();
-          this.secretHashPair2 = newSecretHashPair();
-          const certificate = await craftCertificate(
-            this.extension.contract.methods.hold(
-              this.token.address,
-              this.holdId2,
-              recipient,
-              notary,
-              partition1,
-              smallHoldAmount,
-              SECONDS_IN_AN_HOUR,
-              this.secretHashPair2.hash,
-              EMPTY_CERTIFICATE,
-            ).encodeABI(),
-            this.token,
-            this.extension,
-            this.clock, // this.clock
-            tokenHolder
-          )
-          await this.extension.hold(
-            this.token.address,
-            this.holdId2,
-            recipient,
-            notary,
-            partition1,
-            smallHoldAmount,
-            SECONDS_IN_AN_HOUR,
-            this.secretHashPair2.hash,
-            certificate,
-            { from: tokenHolder }
-          )
-  
-          const initialPartitionBalance = await this.token.balanceOfByPartition(partition1, tokenHolder)
-          const initialRecipientPartitionBalance = await this.token.balanceOfByPartition(partition1, recipient)
-  
-          await this.token.transferFrom(
-            tokenHolder,
-            recipient,
-            smallHoldAmount,
-            { from: notary }
-          )
-  
-          const intermediatePartitionBalance = await this.token.balanceOfByPartition(partition1, tokenHolder)
-          const intermediateRecipientPartitionBalance = await this.token.balanceOfByPartition(partition1, recipient)
-  
-          assert.equal(initialPartitionBalance, issuanceAmount)
-          assert.equal(intermediatePartitionBalance, issuanceAmount-smallHoldAmount)
-  
-          assert.equal(initialRecipientPartitionBalance, 0)
-          assert.equal(intermediateRecipientPartitionBalance, smallHoldAmount)
-  
-          this.holdData2 = await this.extension.retrieveHoldData(this.token.address, this.holdId2);
-          assert.equal(this.holdData2[0], partition1);
-          assert.equal(this.holdData2[1], tokenHolder);
-          assert.equal(this.holdData2[2], recipient);
-          assert.equal(this.holdData2[3], notary);
-          assert.equal(parseInt(this.holdData2[4]), smallHoldAmount);
-          assert.isAtLeast(parseInt(this.holdData2[5]), parseInt(this.time2)+SECONDS_IN_AN_HOUR);
-          assert.isBelow(parseInt(this.holdData2[5]), parseInt(this.time2)+SECONDS_IN_AN_HOUR+100);
-          assert.equal(this.holdData2[6], this.secretHashPair2.hash);
-          assert.equal(this.holdData2[7], EMPTY_BYTE32);
-          assert.equal(parseInt(this.holdData2[8]), HOLD_STATUS_EXECUTED);
-  
-          await this.token.transferFrom(
-            tokenHolder,
-            recipient,
-            smallHoldAmount,
-            { from: notary }
-          )
-  
-          const finalPartitionBalance = await this.token.balanceOfByPartition(partition1, tokenHolder)
-          const finalRecipientPartitionBalance = await this.token.balanceOfByPartition(partition1, recipient)
-  
-          assert.equal(initialPartitionBalance, issuanceAmount)
-          assert.equal(finalPartitionBalance, issuanceAmount-2*smallHoldAmount)
-  
-          assert.equal(initialRecipientPartitionBalance, 0)
-          assert.equal(finalRecipientPartitionBalance, 2*smallHoldAmount)
-  
-          this.holdData = await this.extension.retrieveHoldData(this.token.address, this.holdId);
-          assert.equal(this.holdData[0], partition1);
-          assert.equal(this.holdData[1], tokenHolder);
-          assert.equal(this.holdData[2], recipient);
-          assert.equal(this.holdData[3], notary);
-          assert.equal(parseInt(this.holdData[4]), smallHoldAmount);
-          assert.isAtLeast(parseInt(this.holdData[5]), parseInt(this.time)+SECONDS_IN_AN_HOUR);
-          assert.isBelow(parseInt(this.holdData[5]), parseInt(this.time)+SECONDS_IN_AN_HOUR+100);
-          assert.equal(this.holdData[6], this.secretHashPair.hash);
-          assert.equal(this.holdData[7], EMPTY_BYTE32);
-          assert.equal(parseInt(this.holdData[8]), HOLD_STATUS_EXECUTED);
-        });
-  
-      });
-      // describe("when a hold is not executed", function () {
-      //   beforeEach(async function () {
-      //     this.validatorContract2 = await ERC1400TokensValidator.new({ from: deployer });
-
-      //     await setNewExtensionForToken(
-      //       this.validatorContract2,
-      //       this.token,
-      //       owner,
-      //     );
-  
-      //     await setAllowListActivated(
-      //       this.validatorContract2,
-      //       this.token,
-      //       controller,
-      //       false
-      //     )
-      //     await assertAllowListActivated(
-      //       this.validatorContract2,
-      //       this.token,
-      //       false
-      //     );
-
-      //     await this.token.transferFrom(
-      //       tokenHolder,
-      //       recipient,
-      //       smallHoldAmount,
-      //       { from: notary }
-      //     );
-      //     await setNewExtensionForToken(
-      //       this.extension,
-      //       this.token,
-      //       owner,
-      //     );
-      //   });
-      //   it("reverts", async function() {
-      //     await expectRevert.unspecified(
-      //       this.token.transferFrom(
-      //         tokenHolder,
-      //         recipient,
-      //         smallHoldAmount,
-      //         { from: notary }
-      //       )
-      //     )
-      //   });
-  
-      // });
-    });
   });
 
   // PAUSABLE EXTENSION
@@ -5860,2538 +6117,6 @@ contract("ERC1400HoldableCertificate with token extension", function ([
     });
   });
 
-  // IS HOLDS ACTIVATED
-  describe("isHoldsActivated", function () {
-
-    beforeEach(async function () {
-      await assertHoldsActivated(
-        this.extension,
-        this.token,
-        true
-      );
-
-      await setCertificateActivated(
-        this.extension,
-        this.token,
-        controller,
-        CERTIFICATE_VALIDATION_NONE
-      )
-      await assertCertificateActivated(
-        this.extension,
-        this.token,
-        CERTIFICATE_VALIDATION_NONE
-      );
-
-      await setAllowListActivated(
-        this.extension,
-        this.token,
-        controller,
-        false
-      )
-      await assertAllowListActivated(
-        this.extension,
-        this.token,
-        false
-      );
-
-      await this.token.issueByPartition(
-        partition1,
-        tokenHolder,
-        issuanceAmount,
-        EMPTY_CERTIFICATE,
-        { from: controller }
-      );
-    });
-
-    describe("when holds are activated by the owner", function () {
-      it("activates the holds", async function () {
-        await setHoldsActivated(
-          this.extension,
-          this.token,
-          controller,
-          false
-        )
-        await assertHoldsActivated(
-          this.extension,
-          this.token,
-          false
-        );
-        await setHoldsActivated(
-          this.extension,
-          this.token,
-          controller,
-          true
-        )
-        await assertHoldsActivated(
-          this.extension,
-          this.token,
-          true
-        );
-
-        const holdId = newHoldId();
-        const secretHashPair = newSecretHashPair();
-        await this.extension.holdFrom(
-          this.token.address,
-          holdId,
-          tokenHolder,
-          recipient,
-          notary,
-          partition1,
-          holdAmount,
-          SECONDS_IN_AN_HOUR,
-          secretHashPair.hash,
-          EMPTY_CERTIFICATE,
-          { from: controller }
-        )
-        const spendableBalance = parseInt(await this.extension.spendableBalanceOf(this.token.address, tokenHolder))
-
-        const transferAmount = spendableBalance + 1
-        await expectRevert.unspecified(this.token.transferByPartition(partition1, recipient, transferAmount, EMPTY_CERTIFICATE, { from: tokenHolder }))
-
-        await setHoldsActivated(
-          this.extension,
-          this.token,
-          controller,
-          false
-        )
-        await assertHoldsActivated(
-          this.extension,
-          this.token,
-          false
-        );
-
-        assert.equal(parseInt(await this.token.balanceOfByPartition(partition1, recipient)), 0)
-        await this.token.transferByPartition(partition1, recipient, transferAmount, EMPTY_CERTIFICATE, { from: tokenHolder })
-        assert.equal(parseInt(await this.token.balanceOfByPartition(partition1, recipient)), transferAmount)
-      });
-    });
-    describe("when holds are not activated by the owner", function () {
-      it("reverts", async function () {
-        await setHoldsActivated(
-          this.extension,
-          this.token,
-          controller,
-          false
-        )
-        await assertHoldsActivated(
-          this.extension,
-          this.token,
-          false
-        );
-
-        await expectRevert.unspecified(
-          setHoldsActivated(
-            this.extension,
-            this.token,
-            tokenHolder,
-            true
-          )
-        );
-      });
-    });
-  });
-
-  // HOLD
-  describe("hold", function () {
-    beforeEach(async function () {
-      await assertHoldsActivated(
-        this.extension,
-        this.token,
-        true
-      );
-
-      const certificate = await craftCertificate(
-        this.token.contract.methods.issueByPartition(
-          partition1,
-          tokenHolder,
-          issuanceAmount,
-          EMPTY_CERTIFICATE,
-        ).encodeABI(),
-        this.token,
-        this.extension,
-        this.clock, // this.clock
-        controller
-      )
-      await this.token.issueByPartition(
-        partition1,
-        tokenHolder,
-        issuanceAmount,
-        certificate,
-        { from: controller }
-      );
-      
-    });
-
-    describe("when certificate is activated", function () {
-      beforeEach(async function () {
-        await assertCertificateActivated(
-          this.extension,
-          this.token,
-          CERTIFICATE_VALIDATION_SALT
-        );
-      });
-      describe("when certificate is valid", function () {
-        describe("when hold recipient is not the zero address", function () {
-          describe("when hold value is greater than 0", function () {
-            describe("when hold ID doesn't already exist", function () {
-              describe("when notary is not the zero address", function () {
-                describe("when hold value is not greater than spendable balance", function () {
-                  it("creates a hold", async function () {
-                    const initialBalance = await this.token.balanceOf(tokenHolder)
-                    const initialPartitionBalance = await this.token.balanceOfByPartition(partition1, tokenHolder)
-    
-                    const initialBalanceOnHold = await this.extension.balanceOnHold(this.token.address, tokenHolder)
-                    const initialBalanceOnHoldByPartition = await this.extension.balanceOnHoldByPartition(this.token.address, partition1, tokenHolder)
-    
-                    const initialSpendableBalance = await this.extension.spendableBalanceOf(this.token.address, tokenHolder)
-                    const initialSpendableBalanceByPartition = await this.extension.spendableBalanceOfByPartition(this.token.address, partition1, tokenHolder)
-    
-                    const initialTotalSupplyOnHold = await this.extension.totalSupplyOnHold(this.token.address)
-                    const initialTotalSupplyOnHoldByPartition = await this.extension.totalSupplyOnHoldByPartition(this.token.address, partition1)
-    
-                    const time = await this.clock.getTime();
-                    const holdId = newHoldId();
-                    const secretHashPair = newSecretHashPair();
-                    const certificate = await craftCertificate(
-                      this.extension.contract.methods.hold(
-                        this.token.address,
-                        holdId,
-                        recipient,
-                        notary,
-                        partition1,
-                        holdAmount,
-                        SECONDS_IN_AN_HOUR,
-                        secretHashPair.hash,
-                        EMPTY_CERTIFICATE,
-                      ).encodeABI(),
-                      this.token,
-                      this.extension,
-                      this.clock, // this.clock
-                      tokenHolder
-                    )
-                    await this.extension.hold(
-                      this.token.address,
-                      holdId,
-                      recipient,
-                      notary,
-                      partition1,
-                      holdAmount,
-                      SECONDS_IN_AN_HOUR,
-                      secretHashPair.hash,
-                      certificate,
-                      { from: tokenHolder }
-                    )
-    
-                    const finalBalance = await this.token.balanceOf(tokenHolder)
-                    const finalPartitionBalance = await this.token.balanceOfByPartition(partition1, tokenHolder)
-    
-                    const finalBalanceOnHold = await this.extension.balanceOnHold(this.token.address, tokenHolder)
-                    const finalBalanceOnHoldByPartition = await this.extension.balanceOnHoldByPartition(this.token.address, partition1, tokenHolder)
-    
-                    const finalSpendableBalance = await this.extension.spendableBalanceOf(this.token.address, tokenHolder)
-                    const finalSpendableBalanceByPartition = await this.extension.spendableBalanceOfByPartition(this.token.address, partition1, tokenHolder)
-    
-                    const finalTotalSupplyOnHold = await this.extension.totalSupplyOnHold(this.token.address)
-                    const finalTotalSupplyOnHoldByPartition = await this.extension.totalSupplyOnHoldByPartition(this.token.address, partition1)
-    
-                    assert.equal(initialBalance, issuanceAmount)
-                    assert.equal(finalBalance, issuanceAmount)
-                    assert.equal(initialPartitionBalance, issuanceAmount)
-                    assert.equal(finalPartitionBalance, issuanceAmount)
-    
-                    assert.equal(initialBalanceOnHold, 0)
-                    assert.equal(initialBalanceOnHoldByPartition, 0)
-                    assert.equal(finalBalanceOnHold, holdAmount)
-                    assert.equal(finalBalanceOnHoldByPartition, holdAmount)
-    
-                    assert.equal(initialSpendableBalance, issuanceAmount)
-                    assert.equal(initialSpendableBalanceByPartition, issuanceAmount)
-                    assert.equal(finalSpendableBalance, issuanceAmount - holdAmount)
-                    assert.equal(finalSpendableBalanceByPartition, issuanceAmount - holdAmount)
-    
-                    assert.equal(initialTotalSupplyOnHold, 0)
-                    assert.equal(initialTotalSupplyOnHoldByPartition, 0)
-                    assert.equal(finalTotalSupplyOnHold, holdAmount)
-                    assert.equal(finalTotalSupplyOnHoldByPartition, holdAmount)
-    
-                    this.holdData = await this.extension.retrieveHoldData(this.token.address, holdId);
-                    assert.equal(this.holdData[0], partition1);
-                    assert.equal(this.holdData[1], tokenHolder);
-                    assert.equal(this.holdData[2], recipient);
-                    assert.equal(this.holdData[3], notary);
-                    assert.equal(parseInt(this.holdData[4]), holdAmount);
-                    assert.isAtLeast(parseInt(this.holdData[5]), parseInt(time)+SECONDS_IN_AN_HOUR);
-                    assert.isBelow(parseInt(this.holdData[5]), parseInt(time)+SECONDS_IN_AN_HOUR+100);
-                    assert.equal(this.holdData[6], secretHashPair.hash);
-                    assert.equal(this.holdData[7], EMPTY_BYTE32);
-                    assert.equal(parseInt(this.holdData[8]), HOLD_STATUS_ORDERED);
-                  });
-                  it("can transfer less than spendable balance", async function () {
-                    const holdId = newHoldId();
-                    const secretHashPair = newSecretHashPair();
-                    const certificate = await craftCertificate(
-                      this.extension.contract.methods.hold(
-                        this.token.address,
-                        holdId,
-                        recipient,
-                        notary,
-                        partition1,
-                        holdAmount,
-                        SECONDS_IN_AN_HOUR,
-                        secretHashPair.hash,
-                        EMPTY_CERTIFICATE,
-                      ).encodeABI(),
-                      this.token,
-                      this.extension,
-                      this.clock, // this.clock
-                      tokenHolder
-                    )
-                    await this.extension.hold(
-                      this.token.address,
-                      holdId,
-                      recipient,
-                      notary,
-                      partition1,
-                      holdAmount,
-                      SECONDS_IN_AN_HOUR,
-                      secretHashPair.hash,
-                      certificate,
-                      { from: tokenHolder }
-                    )
-                    const initialSpendableBalance = parseInt(await this.extension.spendableBalanceOf(this.token.address, tokenHolder))
-                    const initialSenderBalance = parseInt(await this.token.balanceOfByPartition(partition1, tokenHolder))
-                    const initialRecipientBalance = parseInt(await this.token.balanceOfByPartition(partition1, recipient))
-    
-                    const transferAmount = initialSpendableBalance
-                    const certificate2 = await craftCertificate(
-                      this.token.contract.methods.transferByPartition(
-                        partition1,
-                        recipient,
-                        transferAmount,
-                        EMPTY_CERTIFICATE,
-                      ).encodeABI(),
-                      this.token,
-                      this.extension,
-                      this.clock, // this.clock
-                      tokenHolder
-                    )
-                    await this.token.transferByPartition(
-                      partition1,
-                      recipient,
-                      transferAmount,
-                      certificate2,
-                      { from: tokenHolder }
-                    )
-    
-                    const finalSpendableBalance = parseInt(await this.extension.spendableBalanceOf(this.token.address, tokenHolder))
-                    const finalSenderBalance = parseInt(await this.token.balanceOfByPartition(partition1, tokenHolder))
-                    const finalRecipientBalance = parseInt(await this.token.balanceOfByPartition(partition1, recipient))
-    
-                    assert.equal(initialSpendableBalance, issuanceAmount - holdAmount)
-                    assert.equal(finalSpendableBalance, 0)
-    
-                    assert.equal(initialSenderBalance, issuanceAmount)
-                    assert.equal(initialRecipientBalance, 0)
-    
-                    assert.equal(finalSenderBalance, issuanceAmount - transferAmount)
-                    assert.equal(finalRecipientBalance, transferAmount)
-                  });
-                  it("can not transfer more than spendable balance", async function () {
-                    const holdId = newHoldId();
-                    const secretHashPair = newSecretHashPair();
-                    const certificate = await craftCertificate(
-                      this.extension.contract.methods.hold(
-                        this.token.address,
-                        holdId,
-                        recipient,
-                        notary,
-                        partition1,
-                        holdAmount,
-                        SECONDS_IN_AN_HOUR,
-                        secretHashPair.hash,
-                        EMPTY_CERTIFICATE,
-                      ).encodeABI(),
-                      this.token,
-                      this.extension,
-                      this.clock, // this.clock
-                      tokenHolder
-                    )
-                    await this.extension.hold(
-                      this.token.address,
-                      holdId,
-                      recipient,
-                      notary,
-                      partition1,
-                      holdAmount,
-                      SECONDS_IN_AN_HOUR,
-                      secretHashPair.hash,
-                      certificate,
-                      { from: tokenHolder }
-                    )
-                    const initialSpendableBalance = await this.extension.spendableBalanceOf(this.token.address, tokenHolder)
-    
-                    const transferAmount = initialSpendableBalance + 1
-                    const certificate2 = await craftCertificate(
-                      this.token.contract.methods.transferByPartition(
-                        partition1,
-                        recipient,
-                        transferAmount,
-                        EMPTY_CERTIFICATE,
-                      ).encodeABI(),
-                      this.token,
-                      this.extension,
-                      this.clock, // this.clock
-                      tokenHolder
-                    )
-                    await expectRevert.unspecified(
-                      this.token.transferByPartition(
-                        partition1,
-                        recipient, 
-                        transferAmount,
-                        certificate2,
-                        { from: tokenHolder }
-                      )
-                    )
-                  });
-                  it("emits an event", async function () {
-                    const holdId = newHoldId();
-                    const secretHashPair = newSecretHashPair();
-                    const time = await this.clock.getTime();
-                    const certificate = await craftCertificate(
-                      this.extension.contract.methods.hold(
-                        this.token.address,
-                        holdId,
-                        recipient,
-                        notary,
-                        partition1,
-                        holdAmount,
-                        SECONDS_IN_AN_HOUR,
-                        secretHashPair.hash,
-                        EMPTY_CERTIFICATE,
-                      ).encodeABI(),
-                      this.token,
-                      this.extension,
-                      this.clock, // this.clock
-                      tokenHolder
-                    )
-                    const { logs } = await this.extension.hold(
-                      this.token.address,
-                      holdId,
-                      recipient,
-                      notary,
-                      partition1,
-                      holdAmount,
-                      SECONDS_IN_AN_HOUR,
-                      secretHashPair.hash,
-                      certificate,
-                      { from: tokenHolder }
-                    )
-    
-                    assert.equal(logs[0].event, "HoldCreated");
-                    assert.equal(logs[0].args.token, this.token.address);
-                    assert.equal(logs[0].args.holdId, holdId);
-                    assert.equal(logs[0].args.partition, partition1);
-                    assert.equal(logs[0].args.sender, tokenHolder);
-                    assert.equal(logs[0].args.recipient, recipient);
-                    assert.equal(logs[0].args.notary, notary);
-                    assert.equal(logs[0].args.value, holdAmount);
-                    assert.isAtLeast(parseInt(logs[0].args.expiration), parseInt(time)+SECONDS_IN_AN_HOUR);
-                    assert.isBelow(parseInt(logs[0].args.expiration), parseInt(time)+SECONDS_IN_AN_HOUR+100);
-                    assert.equal(logs[0].args.secretHash, secretHashPair.hash);
-                  });
-                });
-                describe("when hold value is greater than spendable balance", function () {
-                  it("reverts", async function () {
-                    const initialSpendableBalance = parseInt(await this.extension.spendableBalanceOf(this.token.address, tokenHolder))
-
-                    const holdId = newHoldId();
-                    const secretHashPair = newSecretHashPair();
-                    const certificate = await craftCertificate(
-                      this.extension.contract.methods.hold(
-                        this.token.address,
-                        holdId,
-                        recipient,
-                        notary,
-                        partition1,
-                        initialSpendableBalance+1,
-                        SECONDS_IN_AN_HOUR,
-                        secretHashPair.hash,
-                        EMPTY_CERTIFICATE,
-                      ).encodeABI(),
-                      this.token,
-                      this.extension,
-                      this.clock, // this.clock
-                      tokenHolder
-                    )
-                    await expectRevert.unspecified(
-                      this.extension.hold(
-                        this.token.address,
-                        holdId,
-                        recipient,
-                        notary,
-                        partition1,
-                        initialSpendableBalance+1,
-                        SECONDS_IN_AN_HOUR,
-                        secretHashPair.hash,
-                        certificate,
-                        { from: tokenHolder }
-                      )
-                    )
-                  });
-                });
-              });
-              describe("when notary is the zero address", function () {
-                it("reverts", async function () {
-                  const holdId = newHoldId();
-                  const secretHashPair = newSecretHashPair();
-                  const certificate = await craftCertificate(
-                    this.extension.contract.methods.hold(
-                      this.token.address,
-                      holdId,
-                      recipient,
-                      ZERO_ADDRESS,
-                      partition1,
-                      holdAmount,
-                      SECONDS_IN_AN_HOUR,
-                      secretHashPair.hash,
-                      EMPTY_CERTIFICATE,
-                    ).encodeABI(),
-                    this.token,
-                    this.extension,
-                    this.clock, // this.clock
-                    tokenHolder
-                  )
-                  await expectRevert.unspecified(
-                    this.extension.hold(
-                      this.token.address,
-                      holdId,
-                      recipient,
-                      ZERO_ADDRESS,
-                      partition1,
-                      holdAmount,
-                      SECONDS_IN_AN_HOUR,
-                      secretHashPair.hash,
-                      certificate,
-                      { from: tokenHolder }
-                    )
-                  )
-                });
-              });
-            });
-            describe("when hold ID already exists", function () {
-              it("reverts", async function () {
-                const holdId = newHoldId();
-                const secretHashPair = newSecretHashPair();
-                const certificate = await craftCertificate(
-                  this.extension.contract.methods.hold(
-                    this.token.address,
-                    holdId,
-                    recipient,
-                    notary,
-                    partition1,
-                    1,
-                    SECONDS_IN_AN_HOUR,
-                    secretHashPair.hash,
-                    EMPTY_CERTIFICATE,
-                  ).encodeABI(),
-                  this.token,
-                  this.extension,
-                  this.clock, // this.clock
-                  tokenHolder
-                )
-                await this.extension.hold(
-                  this.token.address,
-                  holdId,
-                  recipient,
-                  notary,
-                  partition1,
-                  1,
-                  SECONDS_IN_AN_HOUR,
-                  secretHashPair.hash,
-                  certificate,
-                  { from: tokenHolder }
-                )
-
-                const certificate2 = await craftCertificate(
-                  this.extension.contract.methods.hold(
-                    this.token.address, 
-                    holdId,
-                    recipient,
-                    notary,
-                    partition1,
-                    1,
-                    SECONDS_IN_AN_HOUR,
-                    secretHashPair.hash,
-                    EMPTY_CERTIFICATE,
-                  ).encodeABI(),
-                  this.token,
-                  this.extension,
-                  this.clock, // this.clock
-                  tokenHolder
-                )
-                await expectRevert.unspecified(
-                  this.extension.hold(
-                    this.token.address, 
-                    holdId,
-                    recipient,
-                    notary,
-                    partition1,
-                    1,
-                    SECONDS_IN_AN_HOUR,
-                    secretHashPair.hash,
-                    certificate2,
-                    { from: tokenHolder }
-                  )
-                )
-              });
-            });
-          });
-          describe("when hold value is not greater than 0", function () {
-            it("reverts", async function () {
-              const holdId = newHoldId();
-              const secretHashPair = newSecretHashPair();
-              const certificate = await craftCertificate(
-                this.extension.contract.methods.hold(
-                  this.token.address,
-                  holdId,
-                  recipient,
-                  notary,
-                  partition1,
-                  0,
-                  SECONDS_IN_AN_HOUR,
-                  secretHashPair.hash,
-                  EMPTY_CERTIFICATE,
-                ).encodeABI(),
-                this.token,
-                this.extension,
-                this.clock, // this.clock
-                tokenHolder
-              )
-              await expectRevert.unspecified(
-                this.extension.hold(
-                  this.token.address,
-                  holdId,
-                  recipient,
-                  notary,
-                  partition1,
-                  0,
-                  SECONDS_IN_AN_HOUR,
-                  secretHashPair.hash,
-                  certificate,
-                  { from: tokenHolder }
-                )
-              )
-            });
-          });
-        });
-        describe("when hold recipient is the zero address", function () {
-          it("reverts", async function () {
-            const holdId = newHoldId();
-            const secretHashPair = newSecretHashPair();
-            const certificate = await craftCertificate(
-              this.extension.contract.methods.hold(
-                this.token.address,
-                holdId,
-                ZERO_ADDRESS,
-                notary,
-                partition1,
-                holdAmount,
-                SECONDS_IN_AN_HOUR,
-                secretHashPair.hash,
-                EMPTY_CERTIFICATE,
-              ).encodeABI(),
-              this.token,
-              this.extension,
-              this.clock, // this.clock
-              tokenHolder
-            )
-            await expectRevert.unspecified(
-              this.extension.hold(
-                this.token.address,
-                holdId,
-                ZERO_ADDRESS,
-                notary,
-                partition1,
-                holdAmount,
-                SECONDS_IN_AN_HOUR,
-                secretHashPair.hash,
-                certificate,
-                { from: tokenHolder }
-              )
-            )
-          });
-        });
-      });
-      describe("when certificate is not valid", function () {
-        it("creates a hold", async function () {
-          const holdId = newHoldId();
-          const secretHashPair = newSecretHashPair();
-          await expectRevert.unspecified(
-            this.extension.hold(
-              this.token.address,
-              holdId,
-              recipient,
-              notary,
-              partition1,
-              holdAmount,
-              SECONDS_IN_AN_HOUR,
-              secretHashPair.hash,
-              EMPTY_CERTIFICATE,
-              { from: tokenHolder }
-            )
-          )
-        });
-      });
-    });
-    describe("when certificate is not activated", function () {
-      beforeEach(async function () {
-        await setCertificateActivated(
-          this.extension,
-          this.token,
-          controller,
-          CERTIFICATE_VALIDATION_NONE
-        );
-
-        await assertCertificateActivated(
-          this.extension,
-          this.token,
-          CERTIFICATE_VALIDATION_NONE
-        );
-      });
-      it("creates a hold", async function () {
-        const initialBalance = await this.token.balanceOf(tokenHolder)
-        const initialPartitionBalance = await this.token.balanceOfByPartition(partition1, tokenHolder)
-
-        const initialBalanceOnHold = await this.extension.balanceOnHold(this.token.address, tokenHolder)
-        const initialBalanceOnHoldByPartition = await this.extension.balanceOnHoldByPartition(this.token.address, partition1, tokenHolder)
-
-        const initialSpendableBalance = await this.extension.spendableBalanceOf(this.token.address, tokenHolder)
-        const initialSpendableBalanceByPartition = await this.extension.spendableBalanceOfByPartition(this.token.address, partition1, tokenHolder)
-
-        const initialTotalSupplyOnHold = await this.extension.totalSupplyOnHold(this.token.address)
-        const initialTotalSupplyOnHoldByPartition = await this.extension.totalSupplyOnHoldByPartition(this.token.address, partition1)
-
-        const time = await this.clock.getTime();
-        const holdId = newHoldId();
-        const secretHashPair = newSecretHashPair();
-        await this.extension.hold(
-          this.token.address,
-          holdId,
-          recipient,
-          notary,
-          partition1,
-          holdAmount,
-          SECONDS_IN_AN_HOUR,
-          secretHashPair.hash,
-          EMPTY_CERTIFICATE,
-          { from: tokenHolder }
-        )
-
-        const finalBalance = await this.token.balanceOf(tokenHolder)
-        const finalPartitionBalance = await this.token.balanceOfByPartition(partition1, tokenHolder)
-
-        const finalBalanceOnHold = await this.extension.balanceOnHold(this.token.address, tokenHolder)
-        const finalBalanceOnHoldByPartition = await this.extension.balanceOnHoldByPartition(this.token.address, partition1, tokenHolder)
-
-        const finalSpendableBalance = await this.extension.spendableBalanceOf(this.token.address, tokenHolder)
-        const finalSpendableBalanceByPartition = await this.extension.spendableBalanceOfByPartition(this.token.address, partition1, tokenHolder)
-
-        const finalTotalSupplyOnHold = await this.extension.totalSupplyOnHold(this.token.address)
-        const finalTotalSupplyOnHoldByPartition = await this.extension.totalSupplyOnHoldByPartition(this.token.address, partition1)
-
-        assert.equal(initialBalance, issuanceAmount)
-        assert.equal(finalBalance, issuanceAmount)
-        assert.equal(initialPartitionBalance, issuanceAmount)
-        assert.equal(finalPartitionBalance, issuanceAmount)
-
-        assert.equal(initialBalanceOnHold, 0)
-        assert.equal(initialBalanceOnHoldByPartition, 0)
-        assert.equal(finalBalanceOnHold, holdAmount)
-        assert.equal(finalBalanceOnHoldByPartition, holdAmount)
-
-        assert.equal(initialSpendableBalance, issuanceAmount)
-        assert.equal(initialSpendableBalanceByPartition, issuanceAmount)
-        assert.equal(finalSpendableBalance, issuanceAmount - holdAmount)
-        assert.equal(finalSpendableBalanceByPartition, issuanceAmount - holdAmount)
-
-        assert.equal(initialTotalSupplyOnHold, 0)
-        assert.equal(initialTotalSupplyOnHoldByPartition, 0)
-        assert.equal(finalTotalSupplyOnHold, holdAmount)
-        assert.equal(finalTotalSupplyOnHoldByPartition, holdAmount)
-
-        this.holdData = await this.extension.retrieveHoldData(this.token.address, holdId);
-        assert.equal(this.holdData[0], partition1);
-        assert.equal(this.holdData[1], tokenHolder);
-        assert.equal(this.holdData[2], recipient);
-        assert.equal(this.holdData[3], notary);
-        assert.equal(parseInt(this.holdData[4]), holdAmount);
-        assert.isAtLeast(parseInt(this.holdData[5]), parseInt(time)+SECONDS_IN_AN_HOUR);
-        assert.isBelow(parseInt(this.holdData[5]), parseInt(time)+SECONDS_IN_AN_HOUR+100);
-        assert.equal(this.holdData[6], secretHashPair.hash);
-        assert.equal(this.holdData[7], EMPTY_BYTE32);
-        assert.equal(parseInt(this.holdData[8]), HOLD_STATUS_ORDERED);
-      });
-    });
-  });
-
-  // HOLD WITH EXPIRATION DATE
-  describe("holdWithExpirationDate", function () {
-
-    beforeEach(async function () {
-      await assertHoldsActivated(
-        this.extension,
-        this.token,
-        true
-      );
-
-      const certificate = await craftCertificate(
-        this.token.contract.methods.issueByPartition(
-          partition1,
-          tokenHolder,
-          issuanceAmount,
-          EMPTY_CERTIFICATE,
-        ).encodeABI(),
-        this.token,
-        this.extension,
-        this.clock, // this.clock
-        controller
-      )
-      await this.token.issueByPartition(
-        partition1,
-        tokenHolder,
-        issuanceAmount,
-        certificate,
-        { from: controller }
-      );
-    });
-
-    describe("when certificate is not activated", function () {
-      beforeEach(async function () {  
-        await setCertificateActivated(
-          this.extension,
-          this.token,
-          controller,
-          CERTIFICATE_VALIDATION_NONE
-        )
-        await assertCertificateActivated(
-          this.extension,
-          this.token,
-          CERTIFICATE_VALIDATION_NONE
-        );
-      });
-      describe("when expiration date is valid", function () {
-        describe("when expiration date is in the future", function () {
-          it("creates a hold", async function () {
-            const time = parseInt(await this.clock.getTime());
-            const holdId = newHoldId();
-            const secretHashPair = newSecretHashPair();
-            const { logs } = await this.extension.holdWithExpirationDate(
-              this.token.address,
-              holdId,
-              recipient,
-              notary,
-              partition1,
-              holdAmount,
-              time+SECONDS_IN_AN_HOUR,
-              secretHashPair.hash,
-              EMPTY_CERTIFICATE,
-              { from: tokenHolder }
-            )
-            assert.equal(parseInt(logs[0].args.expiration), time+SECONDS_IN_AN_HOUR);
-            this.holdData = await this.extension.retrieveHoldData(this.token.address, holdId);
-            assert.equal(parseInt(this.holdData[5]), time+SECONDS_IN_AN_HOUR);
-          });
-        });
-        describe("when there is no expiration date", function () {
-          it("creates a hold", async function () {
-            const holdId = newHoldId();
-            const secretHashPair = newSecretHashPair();
-            const { logs } = await this.extension.holdWithExpirationDate(
-              this.token.address,
-              holdId,
-              recipient,
-              notary,
-              partition1,
-              holdAmount,
-              0,
-              secretHashPair.hash,
-              EMPTY_CERTIFICATE,
-              { from: tokenHolder }
-            )
-            assert.equal(parseInt(logs[0].args.expiration), 0);
-            this.holdData = await this.extension.retrieveHoldData(this.token.address, holdId);
-            assert.equal(parseInt(this.holdData[5]), 0);
-          });
-        });
-      });
-      describe("when expiration date is not valid", function () {
-        it("reverts", async function () {
-          const time = parseInt(await this.clock.getTime());
-          const holdId = newHoldId();
-          const secretHashPair = newSecretHashPair();
-          await expectRevert.unspecified(
-            this.extension.holdWithExpirationDate(
-              this.token.address,
-              holdId,
-              recipient,
-              notary,
-              partition1,
-              holdAmount,
-              time-1,
-              secretHashPair.hash,
-              EMPTY_CERTIFICATE,
-              { from: tokenHolder }
-            )
-          )
-        });
-      });
-    });
-    describe("when certificate is activated", function () {
-      beforeEach(async function () {
-        await assertCertificateActivated(
-          this.extension,
-          this.token,
-          CERTIFICATE_VALIDATION_SALT
-        );
-      });
-      describe("when certificate is valid", function () {
-        it("creates a hold", async function () {
-          const time = parseInt(await this.clock.getTime());
-          const holdId = newHoldId();
-          const secretHashPair = newSecretHashPair();
-          const certificate = await craftCertificate(
-            this.extension.contract.methods.holdWithExpirationDate(
-              this.token.address,
-              holdId,
-              recipient,
-              notary,
-              partition1,
-              holdAmount,
-              time+SECONDS_IN_AN_HOUR,
-              secretHashPair.hash,
-              EMPTY_CERTIFICATE,
-            ).encodeABI(),
-            this.token,
-            this.extension,
-            this.clock, // this.clock
-            tokenHolder
-          )
-          const { logs } = await this.extension.holdWithExpirationDate(
-            this.token.address,
-            holdId,
-            recipient,
-            notary,
-            partition1,
-            holdAmount,
-            time+SECONDS_IN_AN_HOUR,
-            secretHashPair.hash,
-            certificate,
-            { from: tokenHolder }
-          )
-          assert.equal(parseInt(logs[0].args.expiration), time+SECONDS_IN_AN_HOUR);
-          this.holdData = await this.extension.retrieveHoldData(this.token.address, holdId);
-          assert.equal(parseInt(this.holdData[5]), time+SECONDS_IN_AN_HOUR);
-        });
-      });
-      describe("when certificate is not valid", function () {
-        it("reverts", async function () {
-          const time = parseInt(await this.clock.getTime());
-          const holdId = newHoldId();
-          const secretHashPair = newSecretHashPair();
-          await expectRevert.unspecified(
-            this.extension.holdWithExpirationDate(
-              this.token.address,
-              holdId,
-              recipient,
-              notary,
-              partition1,
-              holdAmount,
-              time+SECONDS_IN_AN_HOUR,
-              secretHashPair.hash,
-              EMPTY_CERTIFICATE,
-              { from: tokenHolder }
-            )
-          )
-        });
-      });
-    });
-  });
-
-  // HOLD FROM
-  describe("holdFrom", function () {
-
-    beforeEach(async function () {
-      await assertHoldsActivated(
-        this.extension,
-        this.token,
-        true
-      );
-
-      const certificate = await craftCertificate(
-        this.token.contract.methods.issueByPartition(
-          partition1,
-          tokenHolder,
-          issuanceAmount,
-          EMPTY_CERTIFICATE,
-        ).encodeABI(),
-        this.token,
-        this.extension,
-        this.clock, // this.clock
-        controller
-      )
-      await this.token.issueByPartition(
-        partition1,
-        tokenHolder,
-        issuanceAmount,
-        certificate,
-        { from: controller }
-      );
-    });
-
-    describe("when certificate is not activated", function () {
-      beforeEach(async function () {  
-        await setCertificateActivated(
-          this.extension,
-          this.token,
-          controller,
-          CERTIFICATE_VALIDATION_NONE
-        )
-        await assertCertificateActivated(
-          this.extension,
-          this.token,
-          CERTIFICATE_VALIDATION_NONE
-        );
-      });
-      describe("when hold sender is not the zero address", function () {
-        describe("when hold is created by a token controller", function () {
-          it("creates a hold", async function () {
-            assert.equal(parseInt(await this.extension.balanceOnHoldByPartition(this.token.address, partition1, tokenHolder)), 0);
-            const holdId = newHoldId();
-            const secretHashPair = newSecretHashPair();
-            await this.extension.holdFrom(
-              this.token.address,
-              holdId,
-              tokenHolder,
-              recipient, 
-              notary,
-              partition1,
-              holdAmount,
-              SECONDS_IN_AN_HOUR,
-              secretHashPair.hash,
-              EMPTY_CERTIFICATE,
-              { from: controller }
-            );
-            assert.equal(parseInt(await this.extension.balanceOnHoldByPartition(this.token.address, partition1, tokenHolder)), holdAmount);
-          });
-        });
-        describe("when hold is not created by a token controller", function () {
-          it("reverts", async function () {
-            const holdId = newHoldId();
-            const secretHashPair = newSecretHashPair();
-            await expectRevert.unspecified(
-              this.extension.holdFrom(
-                this.token.address,
-                holdId,
-                tokenHolder,
-                recipient,
-                notary,
-                partition1,
-                holdAmount,
-                SECONDS_IN_AN_HOUR,
-                secretHashPair.hash,
-                EMPTY_CERTIFICATE,
-                { from: recipient }
-              )
-            );
-          });
-        });
-      });
-      describe("when hold sender is the zero address", function () {
-        it("reverts", async function () {
-          const holdId = newHoldId();
-          const secretHashPair = newSecretHashPair();
-          await expectRevert.unspecified(
-            this.extension.holdFrom(
-              this.token.address,
-              holdId,
-              ZERO_ADDRESS,
-              recipient,
-              notary,
-              partition1,
-              holdAmount,
-              SECONDS_IN_AN_HOUR,
-              secretHashPair.hash,
-              EMPTY_CERTIFICATE,
-              { from: controller }
-            )
-          );
-        });
-      });
-    });
-    describe("when certificate is activated", function () {
-      beforeEach(async function () {
-        await assertCertificateActivated(
-          this.extension,
-          this.token,
-          CERTIFICATE_VALIDATION_SALT
-        );
-      });
-      describe("when certificate is valid", function () {
-        it("creates a hold", async function () {
-          assert.equal(parseInt(await this.extension.balanceOnHoldByPartition(this.token.address, partition1, tokenHolder)), 0);
-          const holdId = newHoldId();
-          const secretHashPair = newSecretHashPair();
-          const certificate = await craftCertificate(
-            this.extension.contract.methods.holdFrom(
-              this.token.address,
-              holdId,
-              tokenHolder,
-              recipient, 
-              notary,
-              partition1,
-              holdAmount,
-              SECONDS_IN_AN_HOUR,
-              secretHashPair.hash,
-              EMPTY_CERTIFICATE,
-            ).encodeABI(),
-            this.token,
-            this.extension,
-            this.clock, // this.clock
-            controller
-          )
-          await this.extension.holdFrom(
-            this.token.address,
-            holdId,
-            tokenHolder,
-            recipient, 
-            notary,
-            partition1,
-            holdAmount,
-            SECONDS_IN_AN_HOUR,
-            secretHashPair.hash,
-            certificate,
-            { from: controller }
-          );
-          assert.equal(parseInt(await this.extension.balanceOnHoldByPartition(this.token.address, partition1, tokenHolder)), holdAmount);
-        });
-      });
-      describe("when certificate is not valid", function () {
-        it("creates a hold", async function () {
-          assert.equal(parseInt(await this.extension.balanceOnHoldByPartition(this.token.address, partition1, tokenHolder)), 0);
-          const holdId = newHoldId();
-          const secretHashPair = newSecretHashPair();
-          await expectRevert.unspecified(
-            this.extension.holdFrom(
-              this.token.address,
-              holdId,
-              tokenHolder,
-              recipient, 
-              notary,
-              partition1,
-              holdAmount,
-              SECONDS_IN_AN_HOUR,
-              secretHashPair.hash,
-              EMPTY_CERTIFICATE,
-              { from: controller }
-            )
-          );
-        });
-      });
-    });
-  });
-
-  // HOLD FROM WITH EXPIRATION DATE
-  describe("holdFromWithExpirationDate", function () {
-    beforeEach(async function () {
-      await assertHoldsActivated(
-        this.extension,
-        this.token,
-        true
-      );
-
-      const certificate = await craftCertificate(
-        this.token.contract.methods.issueByPartition(
-          partition1,
-          tokenHolder,
-          issuanceAmount,
-          EMPTY_CERTIFICATE,
-        ).encodeABI(),
-        this.token,
-        this.extension,
-        this.clock, // this.clock
-        controller
-      )
-      await this.token.issueByPartition(
-        partition1,
-        tokenHolder,
-        issuanceAmount,
-        certificate,
-        { from: controller }
-      );
-    });
-
-    describe("when certificate is not activated", function () {
-      beforeEach(async function () {  
-        await setCertificateActivated(
-          this.extension,
-          this.token,
-          controller,
-          CERTIFICATE_VALIDATION_NONE
-        )
-        await assertCertificateActivated(
-          this.extension,
-          this.token,
-          CERTIFICATE_VALIDATION_NONE
-        );
-      });
-      describe("when expiration date is valid", function () {
-        describe("when expiration date is in the future", function () {
-          describe("when hold sender is not the zero address", function () {
-            describe("when hold is created by a token controller", function () {
-              it("creates a hold", async function () {
-                assert.equal(parseInt(await this.extension.balanceOnHoldByPartition(this.token.address, partition1, tokenHolder)), 0);
-                const time = parseInt(await this.clock.getTime());
-                const holdId = newHoldId();
-                const secretHashPair = newSecretHashPair();
-                const { logs } = await this.extension.holdFromWithExpirationDate(
-                  this.token.address,
-                  holdId,
-                  tokenHolder,
-                  recipient,
-                  notary,
-                  partition1,
-                  holdAmount,
-                  time+SECONDS_IN_AN_HOUR,
-                  secretHashPair.hash,
-                  EMPTY_CERTIFICATE,
-                  { from: controller }
-                );
-                assert.equal(parseInt(await this.extension.balanceOnHoldByPartition(this.token.address, partition1, tokenHolder)), holdAmount);
-  
-                assert.equal(parseInt(logs[0].args.expiration), time+SECONDS_IN_AN_HOUR);
-                this.holdData = await this.extension.retrieveHoldData(this.token.address, holdId);
-                assert.equal(parseInt(this.holdData[5]), time+SECONDS_IN_AN_HOUR);
-              });
-            });
-            describe("when hold is not created by a token controller", function () {
-              it("reverts", async function () {
-                const time = parseInt(await this.clock.getTime());
-                const holdId = newHoldId();
-                const secretHashPair = newSecretHashPair();
-                await expectRevert.unspecified(
-                  this.extension.holdFromWithExpirationDate(
-                    this.token.address,
-                    holdId,
-                    tokenHolder,
-                    recipient,
-                    notary,
-                    partition1,
-                    holdAmount,
-                    time+SECONDS_IN_AN_HOUR,
-                    secretHashPair.hash,
-                    EMPTY_CERTIFICATE,
-                    { from: recipient }
-                  )
-                );
-              });
-            });
-          });
-          describe("when hold sender is the zero address", function () {
-            it("reverts", async function () {
-              const time = parseInt(await this.clock.getTime());
-              const holdId = newHoldId();
-              const secretHashPair = newSecretHashPair();
-              await expectRevert.unspecified(
-                this.extension.holdFromWithExpirationDate(
-                  this.token.address,
-                  holdId,
-                  ZERO_ADDRESS,
-                  recipient,
-                  notary,
-                  partition1,
-                  holdAmount,
-                  time+SECONDS_IN_AN_HOUR,
-                  secretHashPair.hash,
-                  EMPTY_CERTIFICATE,
-                  { from: controller }
-                )
-              );
-            });
-          });
-        });
-        describe("when there is no expiration date", function () {
-          it("creates a hold", async function () {
-            assert.equal(parseInt(await this.extension.balanceOnHoldByPartition(this.token.address, partition1, tokenHolder)), 0);
-            // const time = parseInt(await this.clock.getTime());
-            const holdId = newHoldId();
-            const secretHashPair = newSecretHashPair();
-            const { logs } = await this.extension.holdFromWithExpirationDate(
-              this.token.address,
-              holdId,
-              tokenHolder,
-              recipient,
-              notary,
-              partition1,
-              holdAmount,
-              0,
-              secretHashPair.hash,
-              EMPTY_CERTIFICATE,
-              { from: controller }
-            );
-            assert.equal(parseInt(await this.extension.balanceOnHoldByPartition(this.token.address, partition1, tokenHolder)), holdAmount);
-  
-            assert.equal(parseInt(logs[0].args.expiration), 0);
-            this.holdData = await this.extension.retrieveHoldData(this.token.address, holdId);
-            assert.equal(parseInt(this.holdData[5]), 0);
-          });
-        });
-      });
-      describe("when expiration date is not valid", function () {
-        it("reverts", async function () {
-          const time = parseInt(await this.clock.getTime());
-          const holdId = newHoldId();
-          const secretHashPair = newSecretHashPair();
-          await expectRevert.unspecified(
-            this.extension.holdFromWithExpirationDate(
-              this.token.address,
-              holdId,
-              tokenHolder,
-              recipient,
-              notary,
-              partition1,
-              holdAmount,
-              time-1,
-              secretHashPair.hash,
-              EMPTY_CERTIFICATE,
-              { from: controller }
-            )
-          );
-        });
-      });
-    });
-    describe("when certificate is activated", function () {
-      beforeEach(async function () {
-        await assertCertificateActivated(
-          this.extension,
-          this.token,
-          CERTIFICATE_VALIDATION_SALT
-        );
-      });
-      describe("when certificate is valid", function () {
-        it("creates a hold", async function () {
-          assert.equal(parseInt(await this.extension.balanceOnHoldByPartition(this.token.address, partition1, tokenHolder)), 0);
-          const time = parseInt(await this.clock.getTime());
-          const holdId = newHoldId();
-          const secretHashPair = newSecretHashPair();
-          const certificate = await craftCertificate(
-            this.extension.contract.methods.holdFromWithExpirationDate(
-              this.token.address,
-              holdId,
-              tokenHolder,
-              recipient,
-              notary,
-              partition1,
-              holdAmount,
-              time+SECONDS_IN_AN_HOUR,
-              secretHashPair.hash,
-              EMPTY_CERTIFICATE,
-            ).encodeABI(),
-            this.token,
-            this.extension,
-            this.clock, // this.clock
-            controller
-          )
-          const { logs } = await this.extension.holdFromWithExpirationDate(
-            this.token.address,
-            holdId,
-            tokenHolder,
-            recipient,
-            notary,
-            partition1,
-            holdAmount,
-            time+SECONDS_IN_AN_HOUR,
-            secretHashPair.hash,
-            certificate,
-            { from: controller }
-          );
-          assert.equal(parseInt(await this.extension.balanceOnHoldByPartition(this.token.address, partition1, tokenHolder)), holdAmount);
-
-          assert.equal(parseInt(logs[0].args.expiration), time+SECONDS_IN_AN_HOUR);
-          this.holdData = await this.extension.retrieveHoldData(this.token.address, holdId);
-          assert.equal(parseInt(this.holdData[5]), time+SECONDS_IN_AN_HOUR);
-        });
-      });
-      describe("when certificate is not valid", function () {
-        it("reverts", async function () {
-          assert.equal(parseInt(await this.extension.balanceOnHoldByPartition(this.token.address, partition1, tokenHolder)), 0);
-          const time = parseInt(await this.clock.getTime());
-          const holdId = newHoldId();
-          const secretHashPair = newSecretHashPair();
-          await expectRevert.unspecified(
-            this.extension.holdFromWithExpirationDate(
-              this.token.address,
-              holdId,
-              tokenHolder,
-              recipient,
-              notary,
-              partition1,
-              holdAmount,
-              time+SECONDS_IN_AN_HOUR,
-              secretHashPair.hash,
-              EMPTY_CERTIFICATE,
-              { from: controller }
-            )
-          );
-        });
-      });
-    });
-  });
-
-  // RELEASE HOLD
-  describe("releaseHold", function () {
-    beforeEach(async function () {
-      await assertHoldsActivated(
-        this.extension,
-        this.token,
-        true
-      );
-
-      const certificate = await craftCertificate(
-        this.token.contract.methods.issueByPartition(
-          partition1,
-          tokenHolder,
-          issuanceAmount,
-          EMPTY_CERTIFICATE,
-        ).encodeABI(),
-        this.token,
-        this.extension,
-        this.clock, // this.clock
-        controller
-      )
-      await this.token.issueByPartition(
-        partition1,
-        tokenHolder,
-        issuanceAmount,
-        certificate,
-        { from: controller }
-      );
-
-      // Create hold in state Ordered
-      this.time = await this.clock.getTime();
-      this.holdId = newHoldId();
-      this.secretHashPair = newSecretHashPair();
-      const certificate2 = await craftCertificate(
-        this.extension.contract.methods.hold(
-          this.token.address,
-          this.holdId,
-          recipient,
-          notary,
-          partition1,
-          holdAmount,
-          SECONDS_IN_AN_HOUR,
-          this.secretHashPair.hash,
-          EMPTY_CERTIFICATE,
-        ).encodeABI(),
-        this.token,
-        this.extension,
-        this.clock, // this.clock
-        tokenHolder
-      )
-      await this.extension.hold(
-        this.token.address,
-        this.holdId,
-        recipient,
-        notary,
-        partition1,
-        holdAmount,
-        SECONDS_IN_AN_HOUR,
-        this.secretHashPair.hash,
-        certificate2,
-        { from: tokenHolder }
-      )
-    });
-
-    describe("when hold is in status Ordered", function () {
-      describe("when hold can be released", function () {
-        describe("when hold expiration date is past", function () {
-          it("releases the hold", async function () {
-            const initialBalance = await this.token.balanceOf(tokenHolder)
-            const initialPartitionBalance = await this.token.balanceOfByPartition(partition1, tokenHolder)
-
-            const initialBalanceOnHold = await this.extension.balanceOnHold(this.token.address, tokenHolder)
-            const initialBalanceOnHoldByPartition = await this.extension.balanceOnHoldByPartition(this.token.address, partition1, tokenHolder)
-
-            const initialSpendableBalance = await this.extension.spendableBalanceOf(this.token.address, tokenHolder)
-            const initialSpendableBalanceByPartition = await this.extension.spendableBalanceOfByPartition(this.token.address, partition1, tokenHolder)
-
-            const initialTotalSupplyOnHold = await this.extension.totalSupplyOnHold(this.token.address)
-            const initialTotalSupplyOnHoldByPartition = await this.extension.totalSupplyOnHoldByPartition(this.token.address, partition1)
-
-            // Wait for 1 hour
-            await advanceTimeAndBlock(SECONDS_IN_AN_HOUR + 100);
-            await this.extension.releaseHold(this.token.address, this.holdId, { from: tokenHolder });
-
-            const finalBalance = await this.token.balanceOf(tokenHolder)
-            const finalPartitionBalance = await this.token.balanceOfByPartition(partition1, tokenHolder)
-
-            const finalBalanceOnHold = await this.extension.balanceOnHold(this.token.address, tokenHolder)
-            const finalBalanceOnHoldByPartition = await this.extension.balanceOnHoldByPartition(this.token.address, partition1, tokenHolder)
-
-            const finalSpendableBalance = await this.extension.spendableBalanceOf(this.token.address, tokenHolder)
-            const finalSpendableBalanceByPartition = await this.extension.spendableBalanceOfByPartition(this.token.address, partition1, tokenHolder)
-
-            const finalTotalSupplyOnHold = await this.extension.totalSupplyOnHold(this.token.address)
-            const finalTotalSupplyOnHoldByPartition = await this.extension.totalSupplyOnHoldByPartition(this.token.address, partition1)
-
-            assert.equal(initialBalance, issuanceAmount)
-            assert.equal(finalBalance, issuanceAmount)
-            assert.equal(initialPartitionBalance, issuanceAmount)
-            assert.equal(finalPartitionBalance, issuanceAmount)
-
-            assert.equal(initialBalanceOnHold, holdAmount)
-            assert.equal(initialBalanceOnHoldByPartition, holdAmount)
-            assert.equal(finalBalanceOnHold, 0)
-            assert.equal(finalBalanceOnHoldByPartition, 0)
-
-            assert.equal(initialSpendableBalance, issuanceAmount - holdAmount)
-            assert.equal(initialSpendableBalanceByPartition, issuanceAmount - holdAmount)
-            assert.equal(finalSpendableBalance, issuanceAmount)
-            assert.equal(finalSpendableBalanceByPartition, issuanceAmount)
-
-            assert.equal(initialTotalSupplyOnHold, holdAmount)
-            assert.equal(initialTotalSupplyOnHoldByPartition, holdAmount)
-            assert.equal(finalTotalSupplyOnHold, 0)
-            assert.equal(finalTotalSupplyOnHoldByPartition, 0)
-
-            this.holdData = await this.extension.retrieveHoldData(this.token.address, this.holdId);
-            assert.equal(this.holdData[0], partition1);
-            assert.equal(this.holdData[1], tokenHolder);
-            assert.equal(this.holdData[2], recipient);
-            assert.equal(this.holdData[3], notary);
-            assert.equal(parseInt(this.holdData[4]), holdAmount);
-            assert.isAtLeast(parseInt(this.holdData[5]), parseInt(this.time)+SECONDS_IN_AN_HOUR);
-            assert.isBelow(parseInt(this.holdData[5]), parseInt(this.time)+SECONDS_IN_AN_HOUR+100);
-            assert.equal(this.holdData[6], this.secretHashPair.hash);
-            assert.equal(this.holdData[7], EMPTY_BYTE32);
-            assert.equal(parseInt(this.holdData[8]), HOLD_STATUS_RELEASED_ON_EXPIRATION);
-          });
-          it("emits an event", async function () {
-            // Wait for 1 hour
-            await advanceTimeAndBlock(SECONDS_IN_AN_HOUR + 100);
-            const { logs } = await this.extension.releaseHold(this.token.address, this.holdId, { from: tokenHolder });
-          
-            assert.equal(logs[0].event, "HoldReleased");
-            assert.equal(logs[0].args.token, this.token.address);
-            assert.equal(logs[0].args.holdId, this.holdId);
-            assert.equal(logs[0].args.notary, notary);
-            assert.equal(logs[0].args.status, HOLD_STATUS_RELEASED_ON_EXPIRATION);
-          });
-        });
-        describe("when hold is released by the notary", function () {
-          it("releases the hold", async function () {
-            const initialSpendableBalance = parseInt(await this.extension.spendableBalanceOf(this.token.address, tokenHolder))
-            assert.equal(initialSpendableBalance, issuanceAmount - holdAmount);
-
-            const { logs } = await this.extension.releaseHold(this.token.address, this.holdId, { from: notary });
-
-            const finalSpendableBalance = parseInt(await this.extension.spendableBalanceOf(this.token.address, tokenHolder))
-            assert.equal(finalSpendableBalance, issuanceAmount);
-
-            this.holdData = await this.extension.retrieveHoldData(this.token.address, this.holdId);
-            assert.equal(parseInt(this.holdData[8]), HOLD_STATUS_RELEASED_BY_NOTARY);
-            assert.equal(logs[0].args.status, HOLD_STATUS_RELEASED_BY_NOTARY);
-          });
-        });
-        describe("when hold is released by the recipient", function () {
-          it("releases the hold", async function () {
-            const initialSpendableBalance = parseInt(await this.extension.spendableBalanceOf(this.token.address, tokenHolder))
-            assert.equal(initialSpendableBalance, issuanceAmount - holdAmount);
-
-            const { logs } = await this.extension.releaseHold(this.token.address, this.holdId, { from: recipient });
-
-            const finalSpendableBalance = parseInt(await this.extension.spendableBalanceOf(this.token.address, tokenHolder))
-            assert.equal(finalSpendableBalance, issuanceAmount);
-
-            this.holdData = await this.extension.retrieveHoldData(this.token.address, this.holdId);
-            assert.equal(parseInt(this.holdData[8]), HOLD_STATUS_RELEASED_BY_PAYEE);
-            assert.equal(logs[0].args.status, HOLD_STATUS_RELEASED_BY_PAYEE);
-          });
-        });
-      });
-      describe("when hold can not be released", function () {
-        describe("when hold is released by the hold sender", function () {
-          it("reverts", async function () {
-            await expectRevert.unspecified(this.extension.releaseHold(this.token.address, this.holdId, { from: tokenHolder }));
-          });
-        });
-      });
-    });
-    describe("when hold is in status ExecutedAndKeptOpen", function () {
-      it("releases the hold", async function () {
-        const initialSpendableBalance = parseInt(await this.extension.spendableBalanceOf(this.token.address, tokenHolder))
-        assert.equal(initialSpendableBalance, issuanceAmount - holdAmount);
-
-        this.holdData = await this.extension.retrieveHoldData(this.token.address, this.holdId);
-        assert.equal(parseInt(this.holdData[8]), HOLD_STATUS_ORDERED);
-
-        const executedAmount = 10;
-        await this.extension.executeHoldAndKeepOpen(this.token.address, this.holdId, executedAmount, EMPTY_BYTE32, { from: notary });
-        
-        this.holdData = await this.extension.retrieveHoldData(this.token.address, this.holdId);
-        assert.equal(parseInt(this.holdData[8]), HOLD_STATUS_EXECUTED_AND_KEPT_OPEN);
-        
-        const { logs } = await this.extension.releaseHold(this.token.address, this.holdId, { from: notary });
-
-        const finalSpendableBalance = parseInt(await this.extension.spendableBalanceOf(this.token.address, tokenHolder))
-        assert.equal(finalSpendableBalance, issuanceAmount-executedAmount);
-
-        this.holdData = await this.extension.retrieveHoldData(this.token.address, this.holdId);
-        assert.equal(parseInt(this.holdData[8]), HOLD_STATUS_RELEASED_BY_NOTARY);
-        assert.equal(logs[0].args.status, HOLD_STATUS_RELEASED_BY_NOTARY);
-      });
-    });
-    describe("when hold is neither in status Ordered, nor ExecutedAndKeptOpen", function () {
-      it("reverts", async function () {
-        await this.extension.releaseHold(this.token.address, this.holdId, { from: notary });
-        
-        this.holdData = await this.extension.retrieveHoldData(this.token.address, this.holdId);
-        assert.equal(parseInt(this.holdData[8]), HOLD_STATUS_RELEASED_BY_NOTARY);
-        
-        await expectRevert.unspecified(this.extension.releaseHold(this.token.address, this.holdId, { from: notary }));
-      });
-    });
-  });
-
-  // RENEW HOLD
-  describe("renewHold", function () {
-    beforeEach(async function () {
-      await assertHoldsActivated(
-        this.extension,
-        this.token,
-        true
-      );
-
-      const certificate = await craftCertificate(
-        this.token.contract.methods.issueByPartition(
-          partition1,
-          tokenHolder,
-          issuanceAmount,
-          EMPTY_CERTIFICATE,
-        ).encodeABI(),
-        this.token,
-        this.extension,
-        this.clock, // this.clock
-        controller
-      )
-      await this.token.issueByPartition(
-        partition1,
-        tokenHolder,
-        issuanceAmount,
-        certificate,
-        { from: controller }
-      );
-
-      // Create hold in state Ordered
-      this.time = await this.clock.getTime();
-      this.holdId = newHoldId();
-      this.secretHashPair = newSecretHashPair();
-      const certificate2 = await craftCertificate(
-        this.extension.contract.methods.hold(
-          this.token.address,
-          this.holdId,
-          recipient,
-          notary,
-          partition1,
-          holdAmount,
-          SECONDS_IN_AN_HOUR,
-          this.secretHashPair.hash,
-          EMPTY_CERTIFICATE,
-        ).encodeABI(),
-        this.token,
-        this.extension,
-        this.clock, // this.clock
-        tokenHolder
-      )
-      await this.extension.hold(
-        this.token.address,
-        this.holdId,
-        recipient,
-        notary,
-        partition1,
-        holdAmount,
-        SECONDS_IN_AN_HOUR,
-        this.secretHashPair.hash,
-        certificate2,
-        { from: tokenHolder }
-      )
-    });
-
-    describe("when certificate is not activated", function () {
-      beforeEach(async function () {  
-        await setCertificateActivated(
-          this.extension,
-          this.token,
-          controller,
-          CERTIFICATE_VALIDATION_NONE
-        )
-        await assertCertificateActivated(
-          this.extension,
-          this.token,
-          CERTIFICATE_VALIDATION_NONE
-        );
-      });
-      describe("when hold can be renewed", function () {
-        describe("when hold is in status Ordered", function () {
-          describe("when hold is not expired", function () {
-            describe("when hold is renewed by the sender", function () {
-              it("renews the hold (expiration date future)", async function () {
-                this.holdData = await this.extension.retrieveHoldData(this.token.address, this.holdId);
-                assert.isAtLeast(parseInt(this.holdData[5]), parseInt(this.time)+SECONDS_IN_AN_HOUR-2);
-                assert.isBelow(parseInt(this.holdData[5]), parseInt(this.time)+SECONDS_IN_AN_HOUR+100);
-  
-                this.time = await this.clock.getTime();
-                await this.extension.renewHold(
-                  this.token.address,
-                  this.holdId,
-                  SECONDS_IN_A_DAY,
-                  EMPTY_CERTIFICATE,
-                  { from: tokenHolder }
-                );
-                
-                this.holdData = await this.extension.retrieveHoldData(this.token.address, this.holdId);
-                assert.isAtLeast(parseInt(this.holdData[5]), parseInt(this.time)+SECONDS_IN_A_DAY-2);
-                assert.isBelow(parseInt(this.holdData[5]), parseInt(this.time)+SECONDS_IN_A_DAY+100);
-              });
-              it("renews the hold (expiration date now)", async function () {
-                this.holdData = await this.extension.retrieveHoldData(this.token.address, this.holdId);
-                assert.isAtLeast(parseInt(this.holdData[5]), parseInt(this.time)+SECONDS_IN_AN_HOUR-2);
-                assert.isBelow(parseInt(this.holdData[5]), parseInt(this.time)+SECONDS_IN_AN_HOUR+100);
-  
-                this.time = await this.clock.getTime();
-                await this.extension.renewHold(
-                  this.token.address,
-                  this.holdId,
-                  0,
-                  EMPTY_CERTIFICATE,
-                  { from: tokenHolder }
-                );
-                
-                this.holdData = await this.extension.retrieveHoldData(this.token.address, this.holdId);
-                assert.equal(parseInt(this.holdData[5]), 0);
-              });
-              it("emits an event", async function () {
-                const { logs } = await this.extension.renewHold(
-                  this.token.address,
-                  this.holdId,
-                  SECONDS_IN_A_DAY,
-                  EMPTY_CERTIFICATE,
-                  { from: tokenHolder }
-                );
-  
-                assert.equal(logs[0].event, "HoldRenewed");
-                assert.equal(logs[0].args.token, this.token.address);
-                assert.equal(logs[0].args.holdId, this.holdId);
-                assert.equal(logs[0].args.notary, notary);
-                assert.isAtLeast(parseInt(logs[0].args.oldExpiration), parseInt(this.time)+SECONDS_IN_AN_HOUR-2);
-                assert.isBelow(parseInt(logs[0].args.oldExpiration), parseInt(this.time)+SECONDS_IN_AN_HOUR+100);
-                assert.isAtLeast(parseInt(logs[0].args.newExpiration), parseInt(this.time)+SECONDS_IN_A_DAY-2);
-                assert.isBelow(parseInt(logs[0].args.newExpiration), parseInt(this.time)+SECONDS_IN_A_DAY+100);
-              });
-            });
-            describe("when hold is renewed by an operator", function () {
-              it("renews the hold", async function () {
-                this.holdData = await this.extension.retrieveHoldData(this.token.address, this.holdId);
-                assert.isAtLeast(parseInt(this.holdData[5]), parseInt(this.time)+SECONDS_IN_AN_HOUR-2);
-                assert.isBelow(parseInt(this.holdData[5]), parseInt(this.time)+SECONDS_IN_AN_HOUR+100);
-  
-                this.time = await this.clock.getTime();
-                await this.extension.renewHold(
-                  this.token.address,
-                  this.holdId,
-                  SECONDS_IN_A_DAY,
-                  EMPTY_CERTIFICATE,
-                  { from: controller }
-                );
-                
-                this.holdData = await this.extension.retrieveHoldData(this.token.address, this.holdId);
-                assert.isAtLeast(parseInt(this.holdData[5]), parseInt(this.time)+SECONDS_IN_A_DAY-2);
-                assert.isBelow(parseInt(this.holdData[5]), parseInt(this.time)+SECONDS_IN_A_DAY+100);
-              });
-            });
-            describe("when hold is neither renewed by the sender, nor by an operator", function () {
-              it("reverts", async function () {
-                await expectRevert.unspecified(
-                  this.extension.renewHold(
-                    this.token.address,
-                    this.holdId,
-                    SECONDS_IN_A_DAY,
-                    EMPTY_CERTIFICATE,
-                    { from: recipient }
-                  )
-                );
-              });
-            });
-          });
-          describe("when hold is expired", function () {
-            it("reverts", async function () {
-              this.holdData = await this.extension.retrieveHoldData(this.token.address, this.holdId);
-              assert.isAtLeast(parseInt(this.holdData[5]), parseInt(this.time)+SECONDS_IN_AN_HOUR-2);
-              assert.isBelow(parseInt(this.holdData[5]), parseInt(this.time)+SECONDS_IN_AN_HOUR+100);
-  
-              // Wait for more than an hour
-              await advanceTimeAndBlock(SECONDS_IN_AN_HOUR + 100);
-  
-              await expectRevert.unspecified(
-                this.extension.renewHold(
-                  this.token.address,
-                  this.holdId,
-                  SECONDS_IN_A_DAY,
-                  EMPTY_CERTIFICATE,
-                  { from: tokenHolder }
-                )
-              );
-            });
-          });
-        });
-        describe("when hold is in status ExecutedAndKeptOpen", function () {
-          it("renews the hold", async function () {
-            this.holdData = await this.extension.retrieveHoldData(this.token.address, this.holdId);
-            assert.equal(parseInt(this.holdData[8]), HOLD_STATUS_ORDERED);
-
-            await this.extension.addAllowlisted(this.token.address, tokenHolder, { from: controller });
-            await this.extension.addAllowlisted(this.token.address, recipient, { from: controller });
-  
-            const executedAmount = 10;
-            await this.extension.executeHoldAndKeepOpen(this.token.address, this.holdId, executedAmount, EMPTY_BYTE32, { from: notary });
-            
-            this.holdData = await this.extension.retrieveHoldData(this.token.address, this.holdId);
-            assert.equal(parseInt(this.holdData[8]), HOLD_STATUS_EXECUTED_AND_KEPT_OPEN);
-  
-            this.holdData = await this.extension.retrieveHoldData(this.token.address, this.holdId);
-            assert.isAtLeast(parseInt(this.holdData[5]), parseInt(this.time)+SECONDS_IN_AN_HOUR-2);
-            assert.isBelow(parseInt(this.holdData[5]), parseInt(this.time)+SECONDS_IN_AN_HOUR+100);
-  
-            this.time = await this.clock.getTime();
-            await this.extension.renewHold(
-              this.token.address,
-              this.holdId,
-              SECONDS_IN_A_DAY,
-              EMPTY_CERTIFICATE,
-              { from: tokenHolder }
-            );
-            
-            this.holdData = await this.extension.retrieveHoldData(this.token.address, this.holdId);
-            assert.isAtLeast(parseInt(this.holdData[5]), parseInt(this.time)+SECONDS_IN_A_DAY-2);
-            assert.isBelow(parseInt(this.holdData[5]), parseInt(this.time)+SECONDS_IN_A_DAY+100);
-          });
-        });
-      });
-      describe("when hold can not be renewed", function () {
-        describe("when hold is neither in status Ordered, nor ExecutedAndKeptOpen", function () {
-          it("reverts", async function () {
-            await this.extension.releaseHold(
-              this.token.address,
-              this.holdId,
-              { from: notary }
-            );
-  
-            this.holdData = await this.extension.retrieveHoldData(this.token.address, this.holdId);
-            assert.equal(parseInt(this.holdData[8]), HOLD_STATUS_RELEASED_BY_NOTARY);
-  
-            await expectRevert.unspecified(
-              this.extension.renewHold(
-                this.token.address,
-                this.holdId,
-                SECONDS_IN_A_DAY,
-                EMPTY_CERTIFICATE,
-                { from: tokenHolder }
-              )
-            );
-          });
-        });
-      });
-    });
-    describe("when certificate is activated", function () {
-      beforeEach(async function () {
-        await assertCertificateActivated(
-          this.extension,
-          this.token,
-          CERTIFICATE_VALIDATION_SALT
-        );
-      });
-      describe("when certificate is valid", function () {
-        it("renews the hold (expiration date future)", async function () {
-          this.holdData = await this.extension.retrieveHoldData(this.token.address, this.holdId);
-          assert.isAtLeast(parseInt(this.holdData[5]), parseInt(this.time)+SECONDS_IN_AN_HOUR-2);
-          assert.isBelow(parseInt(this.holdData[5]), parseInt(this.time)+SECONDS_IN_AN_HOUR+100);
-
-          this.time = await this.clock.getTime();
-          const certificate = await craftCertificate(
-            this.extension.contract.methods.renewHold(
-              this.token.address,
-              this.holdId,
-              SECONDS_IN_A_DAY,
-              EMPTY_CERTIFICATE,
-            ).encodeABI(),
-            this.token,
-            this.extension,
-            this.clock, // this.clock
-            tokenHolder
-          )
-          await this.extension.renewHold(
-            this.token.address,
-            this.holdId,
-            SECONDS_IN_A_DAY,
-            certificate,
-            { from: tokenHolder }
-          );
-          
-          this.holdData = await this.extension.retrieveHoldData(this.token.address, this.holdId);
-          assert.isAtLeast(parseInt(this.holdData[5]), parseInt(this.time)+SECONDS_IN_A_DAY-2);
-          assert.isBelow(parseInt(this.holdData[5]), parseInt(this.time)+SECONDS_IN_A_DAY+100);
-        });
-      });
-      describe("when certificate is not valid", function () {
-        it("reverts", async function () {
-          this.holdData = await this.extension.retrieveHoldData(this.token.address, this.holdId);
-          assert.isAtLeast(parseInt(this.holdData[5]), parseInt(this.time)+SECONDS_IN_AN_HOUR-2);
-          assert.isBelow(parseInt(this.holdData[5]), parseInt(this.time)+SECONDS_IN_AN_HOUR+100);
-
-          this.time = await this.clock.getTime();
-          await expectRevert.unspecified(
-            this.extension.renewHold(
-              this.token.address,
-              this.holdId,
-              SECONDS_IN_A_DAY,
-              EMPTY_CERTIFICATE,
-              { from: tokenHolder }
-            )
-          );
-        });
-      });
-    });
-  });
-
-  // RENEW HOLD WITH EXPIRATION DATE
-  describe("renewHoldWithExpirationDate", function () {
-    beforeEach(async function () {
-      await assertHoldsActivated(
-        this.extension,
-        this.token,
-        true
-      );
-
-      const certificate = await craftCertificate(
-        this.token.contract.methods.issueByPartition(
-          partition1,
-          tokenHolder,
-          issuanceAmount,
-          EMPTY_CERTIFICATE,
-        ).encodeABI(),
-        this.token,
-        this.extension,
-        this.clock, // this.clock
-        controller
-      )
-      await this.token.issueByPartition(
-        partition1,
-        tokenHolder,
-        issuanceAmount,
-        certificate,
-        { from: controller }
-      );
-
-      // Create hold in state Ordered
-      this.time = await this.clock.getTime();
-      this.holdId = newHoldId();
-      this.secretHashPair = newSecretHashPair();
-      const certificate2 = await craftCertificate(
-        this.extension.contract.methods.hold(
-          this.token.address,
-          this.holdId,
-          recipient,
-          notary,
-          partition1,
-          holdAmount,
-          SECONDS_IN_AN_HOUR,
-          this.secretHashPair.hash,
-          EMPTY_CERTIFICATE,
-        ).encodeABI(),
-        this.token,
-        this.extension,
-        this.clock, // this.clock
-        tokenHolder
-      )
-      await this.extension.hold(
-        this.token.address,
-        this.holdId,
-        recipient,
-        notary,
-        partition1,
-        holdAmount,
-        SECONDS_IN_AN_HOUR,
-        this.secretHashPair.hash,
-        certificate2,
-        { from: tokenHolder }
-      )
-    });
-
-    describe("when certificate is not activated", function () {
-      beforeEach(async function () {  
-        await setCertificateActivated(
-          this.extension,
-          this.token,
-          controller,
-          CERTIFICATE_VALIDATION_NONE
-        )
-        await assertCertificateActivated(
-          this.extension,
-          this.token,
-          CERTIFICATE_VALIDATION_NONE
-        );
-      });
-      describe("when expiration date is valid", function () {
-        describe("when expiration date is in the future", function () {
-          it("renews the hold", async function () {
-            this.holdData = await this.extension.retrieveHoldData(this.token.address, this.holdId);
-            assert.isAtLeast(parseInt(this.holdData[5]), parseInt(this.time)+SECONDS_IN_AN_HOUR-2);
-            assert.isBelow(parseInt(this.holdData[5]), parseInt(this.time)+SECONDS_IN_AN_HOUR+100);
-  
-            this.time = parseInt(await this.clock.getTime());
-            const { logs } = await this.extension.renewHoldWithExpirationDate(
-              this.token.address,
-              this.holdId,
-              this.time+SECONDS_IN_A_DAY,
-              EMPTY_CERTIFICATE,
-              { from: tokenHolder }
-            );
-            
-            this.holdData = await this.extension.retrieveHoldData(this.token.address, this.holdId);
-            assert.isAtLeast(parseInt(this.holdData[5]), parseInt(this.time)+SECONDS_IN_A_DAY-2);
-            assert.isBelow(parseInt(this.holdData[5]), parseInt(this.time)+SECONDS_IN_A_DAY+100);
-  
-            assert.equal(logs[0].event, "HoldRenewed");
-            assert.equal(logs[0].args.token, this.token.address);
-            assert.equal(logs[0].args.holdId, this.holdId);
-            assert.equal(logs[0].args.notary, notary);
-            assert.isAtLeast(parseInt(logs[0].args.oldExpiration), parseInt(this.time)+SECONDS_IN_AN_HOUR-2);
-            assert.isBelow(parseInt(logs[0].args.oldExpiration), parseInt(this.time)+SECONDS_IN_AN_HOUR+100);
-            assert.isAtLeast(parseInt(logs[0].args.newExpiration), parseInt(this.time)+SECONDS_IN_A_DAY-2);
-            assert.isBelow(parseInt(logs[0].args.newExpiration), parseInt(this.time)+SECONDS_IN_A_DAY+100);
-          });
-        });
-        describe("when there is no expiration date", function () {
-          it("renews the hold", async function () {
-            this.holdData = await this.extension.retrieveHoldData(this.token.address, this.holdId);
-            assert.isAtLeast(parseInt(this.holdData[5]), parseInt(this.time)+SECONDS_IN_AN_HOUR-2);
-            assert.isBelow(parseInt(this.holdData[5]), parseInt(this.time)+SECONDS_IN_AN_HOUR+100);
-  
-            const { logs } = await this.extension.renewHoldWithExpirationDate(
-              this.token.address,
-              this.holdId,
-              0,
-              EMPTY_CERTIFICATE,
-              { from: tokenHolder }
-            );
-  
-            this.holdData = await this.extension.retrieveHoldData(this.token.address, this.holdId);
-                      
-            assert.equal(parseInt(this.holdData[5]), 0);
-  
-            assert.equal(logs[0].event, "HoldRenewed");
-            assert.isAtLeast(parseInt(logs[0].args.oldExpiration), parseInt(this.time)+SECONDS_IN_AN_HOUR-2);
-            assert.isBelow(parseInt(logs[0].args.oldExpiration), parseInt(this.time)+SECONDS_IN_AN_HOUR+100);
-            assert.equal(parseInt(logs[0].args.newExpiration), 0);
-          });
-        });
-      });
-      describe("when expiration date is not valid", function () {
-        it("reverts", async function () {
-          this.time = await this.clock.getTime();
-          await expectRevert.unspecified(
-            this.extension.renewHoldWithExpirationDate(
-              this.token.address,
-              this.holdId,
-              this.time-1,
-              EMPTY_CERTIFICATE,
-              { from: tokenHolder }
-            )
-          );
-        });
-      });
-    });
-    describe("when certificate is activated", function () {
-      beforeEach(async function () {
-        await assertCertificateActivated(
-          this.extension,
-          this.token,
-          CERTIFICATE_VALIDATION_SALT
-        );
-      });
-      describe("when certificate is valid", function () {
-        it("renews the hold", async function () {
-          this.holdData = await this.extension.retrieveHoldData(this.token.address, this.holdId);
-          assert.isAtLeast(parseInt(this.holdData[5]), parseInt(this.time)+SECONDS_IN_AN_HOUR-2);
-          assert.isBelow(parseInt(this.holdData[5]), parseInt(this.time)+SECONDS_IN_AN_HOUR+100);
-
-          this.time = parseInt(await this.clock.getTime());
-          const certificate = await craftCertificate(
-            this.extension.contract.methods.renewHoldWithExpirationDate(
-              this.token.address,
-              this.holdId,
-              this.time+SECONDS_IN_A_DAY,
-              EMPTY_CERTIFICATE,
-            ).encodeABI(),
-            this.token,
-            this.extension,
-            this.clock, // this.clock
-            tokenHolder
-          )
-          const { logs } = await this.extension.renewHoldWithExpirationDate(
-            this.token.address,
-            this.holdId,
-            this.time+SECONDS_IN_A_DAY,
-            certificate,
-            { from: tokenHolder }
-          );
-          
-          this.holdData = await this.extension.retrieveHoldData(this.token.address, this.holdId);
-          assert.isAtLeast(parseInt(this.holdData[5]), parseInt(this.time)+SECONDS_IN_A_DAY-2);
-          assert.isBelow(parseInt(this.holdData[5]), parseInt(this.time)+SECONDS_IN_A_DAY+100);
-
-          assert.equal(logs[0].event, "HoldRenewed");
-          assert.equal(logs[0].args.token, this.token.address);
-          assert.equal(logs[0].args.holdId, this.holdId);
-          assert.equal(logs[0].args.notary, notary);
-          assert.isAtLeast(parseInt(logs[0].args.oldExpiration), parseInt(this.time)+SECONDS_IN_AN_HOUR-2);
-          assert.isBelow(parseInt(logs[0].args.oldExpiration), parseInt(this.time)+SECONDS_IN_AN_HOUR+100);
-          assert.isAtLeast(parseInt(logs[0].args.newExpiration), parseInt(this.time)+SECONDS_IN_A_DAY-2);
-          assert.isBelow(parseInt(logs[0].args.newExpiration), parseInt(this.time)+SECONDS_IN_A_DAY+100);
-        });
-      });
-      describe("when certificate is not valid", function () {
-        it("renews the hold", async function () {
-          this.holdData = await this.extension.retrieveHoldData(this.token.address, this.holdId);
-          assert.isAtLeast(parseInt(this.holdData[5]), parseInt(this.time)+SECONDS_IN_AN_HOUR-2);
-          assert.isBelow(parseInt(this.holdData[5]), parseInt(this.time)+SECONDS_IN_AN_HOUR+100);
-
-          this.time = parseInt(await this.clock.getTime());
-          await expectRevert.unspecified(
-            this.extension.renewHoldWithExpirationDate(
-              this.token.address,
-              this.holdId,
-              this.time+SECONDS_IN_A_DAY,
-              EMPTY_CERTIFICATE,
-              { from: tokenHolder }
-            )
-          );
-        });
-      });
-    });
-  });
-
-  // EXECUTE HOLD
-  describe("executeHold", function () {
-    beforeEach(async function () {
-      await assertHoldsActivated(
-        this.extension,
-        this.token,
-        true
-      );
-
-      const certificate = await craftCertificate(
-        this.token.contract.methods.issueByPartition(
-          partition1,
-          tokenHolder,
-          issuanceAmount,
-          EMPTY_CERTIFICATE,
-        ).encodeABI(),
-        this.token,
-        this.extension,
-        this.clock, // this.clock
-        controller
-      )
-      await this.token.issueByPartition(
-        partition1,
-        tokenHolder,
-        issuanceAmount,
-        certificate,
-        { from: controller }
-      );
-
-      // Create hold in state Ordered
-      this.time = await this.clock.getTime();
-      this.holdId = newHoldId();
-      this.secretHashPair = newSecretHashPair();
-      const certificate2 = await craftCertificate(
-        this.extension.contract.methods.hold(
-          this.token.address,
-          this.holdId,
-          recipient,
-          notary,
-          partition1,
-          holdAmount,
-          SECONDS_IN_AN_HOUR,
-          this.secretHashPair.hash,
-          EMPTY_CERTIFICATE,
-        ).encodeABI(),
-        this.token,
-        this.extension,
-        this.clock, // this.clock
-        tokenHolder
-      )
-      await this.extension.hold(
-        this.token.address,
-        this.holdId,
-        recipient,
-        notary,
-        partition1,
-        holdAmount,
-        SECONDS_IN_AN_HOUR,
-        this.secretHashPair.hash,
-        certificate2,
-        { from: tokenHolder }
-      )
-    });
-
-    describe("when hold can be executed", function () {
-      describe("when hold is in status Ordered", function () {
-        describe("when value is not nil", function () {
-          describe("when hold is executed by the notary", function () {
-            describe("when hold is not expired", function () {
-              describe("when value is not higher than hold value", function () {
-                describe("when hold shall not be kept open", function () {
-                  describe("when the whole amount is executed", function () {
-                    it("executes the hold", async function() {
-                      const initialBalance = await this.token.balanceOf(tokenHolder)
-                      const initialPartitionBalance = await this.token.balanceOfByPartition(partition1, tokenHolder)
-      
-                      const initialBalanceOnHold = await this.extension.balanceOnHold(this.token.address, tokenHolder)
-                      const initialBalanceOnHoldByPartition = await this.extension.balanceOnHoldByPartition(this.token.address, partition1, tokenHolder)
-      
-                      const initialSpendableBalance = await this.extension.spendableBalanceOf(this.token.address, tokenHolder)
-                      const initialSpendableBalanceByPartition = await this.extension.spendableBalanceOfByPartition(this.token.address, partition1, tokenHolder)
-      
-                      const initialTotalSupplyOnHold = await this.extension.totalSupplyOnHold(this.token.address)
-                      const initialTotalSupplyOnHoldByPartition = await this.extension.totalSupplyOnHoldByPartition(this.token.address, partition1)
-      
-                      const initialRecipientBalance = await this.token.balanceOf(recipient)
-                      const initialRecipientPartitionBalance = await this.token.balanceOfByPartition(partition1, recipient)
-  
-                      await this.extension.executeHold(this.token.address, this.holdId, holdAmount, EMPTY_BYTE32, { from: notary })
-      
-                      const finalBalance = await this.token.balanceOf(tokenHolder)
-                      const finalPartitionBalance = await this.token.balanceOfByPartition(partition1, tokenHolder)
-      
-                      const finalBalanceOnHold = await this.extension.balanceOnHold(this.token.address, tokenHolder)
-                      const finalBalanceOnHoldByPartition = await this.extension.balanceOnHoldByPartition(this.token.address, partition1, tokenHolder)
-      
-                      const finalSpendableBalance = await this.extension.spendableBalanceOf(this.token.address, tokenHolder)
-                      const finalSpendableBalanceByPartition = await this.extension.spendableBalanceOfByPartition(this.token.address, partition1, tokenHolder)
-      
-                      const finalTotalSupplyOnHold = await this.extension.totalSupplyOnHold(this.token.address)
-                      const finalTotalSupplyOnHoldByPartition = await this.extension.totalSupplyOnHoldByPartition(this.token.address, partition1)
-  
-                      const finalRecipientBalance = await this.token.balanceOf(recipient)
-                      const finalRecipientPartitionBalance = await this.token.balanceOfByPartition(partition1, recipient)
-  
-                      assert.equal(initialBalance, issuanceAmount)
-                      assert.equal(finalBalance, issuanceAmount-holdAmount)
-                      assert.equal(initialPartitionBalance, issuanceAmount)
-                      assert.equal(finalPartitionBalance, issuanceAmount-holdAmount)
-      
-                      assert.equal(initialBalanceOnHold, holdAmount)
-                      assert.equal(initialBalanceOnHoldByPartition, holdAmount)
-                      assert.equal(finalBalanceOnHold, 0)
-                      assert.equal(finalBalanceOnHoldByPartition, 0)
-      
-                      assert.equal(initialSpendableBalance, issuanceAmount-holdAmount)
-                      assert.equal(initialSpendableBalanceByPartition, issuanceAmount-holdAmount)
-                      assert.equal(finalSpendableBalance, issuanceAmount-holdAmount)
-                      assert.equal(finalSpendableBalanceByPartition, issuanceAmount-holdAmount)
-      
-                      assert.equal(initialTotalSupplyOnHold, holdAmount)
-                      assert.equal(initialTotalSupplyOnHoldByPartition, holdAmount)
-                      assert.equal(finalTotalSupplyOnHold, 0)
-                      assert.equal(finalTotalSupplyOnHoldByPartition, 0)
-  
-                      assert.equal(initialRecipientBalance, 0)
-                      assert.equal(initialRecipientPartitionBalance, 0)
-                      assert.equal(finalRecipientBalance, holdAmount)
-                      assert.equal(finalRecipientPartitionBalance, holdAmount)
-      
-                      this.holdData = await this.extension.retrieveHoldData(this.token.address, this.holdId);
-                      assert.equal(this.holdData[0], partition1);
-                      assert.equal(this.holdData[1], tokenHolder);
-                      assert.equal(this.holdData[2], recipient);
-                      assert.equal(this.holdData[3], notary);
-                      assert.equal(parseInt(this.holdData[4]), holdAmount);
-                      assert.isAtLeast(parseInt(this.holdData[5]), parseInt(this.time)+SECONDS_IN_AN_HOUR);
-                      assert.isBelow(parseInt(this.holdData[5]), parseInt(this.time)+SECONDS_IN_AN_HOUR+100);
-                      assert.equal(this.holdData[6], this.secretHashPair.hash);
-                      assert.equal(this.holdData[7], EMPTY_BYTE32);
-                      assert.equal(parseInt(this.holdData[8]), HOLD_STATUS_EXECUTED);
-                    });
-                    it("emits an event", async function() {
-                      const { logs } = await this.extension.executeHold(this.token.address, this.holdId, holdAmount, EMPTY_BYTE32, { from: notary })
-      
-                      assert.equal(logs[0].event, "HoldExecuted");
-                      assert.equal(logs[0].args.token, this.token.address);
-                      assert.equal(logs[0].args.holdId, this.holdId);
-                      assert.equal(logs[0].args.notary, notary);
-                      assert.equal(logs[0].args.heldValue, holdAmount);
-                      assert.equal(logs[0].args.transferredValue, holdAmount);
-                      assert.equal(logs[0].args.secret, EMPTY_BYTE32);
-                    });
-                  });
-                  describe("when a partial amount is executed", function () {
-                    it("executes the hold", async function() {
-                      const initialPartitionBalance = await this.token.balanceOfByPartition(partition1, tokenHolder)
-                      const initialRecipientPartitionBalance = await this.token.balanceOfByPartition(partition1, recipient)
-  
-                      const executedAmount = 400
-                      await this.extension.executeHold(this.token.address, this.holdId, executedAmount, EMPTY_BYTE32, { from: notary })
-      
-                      const finalPartitionBalance = await this.token.balanceOfByPartition(partition1, tokenHolder)
-                      const finalRecipientPartitionBalance = await this.token.balanceOfByPartition(partition1, recipient)
-  
-                      assert.equal(initialPartitionBalance, issuanceAmount)
-                      assert.equal(finalPartitionBalance, issuanceAmount-executedAmount)
-      
-                      assert.equal(initialRecipientPartitionBalance, 0)
-                      assert.equal(finalRecipientPartitionBalance, executedAmount)
-      
-                      this.holdData = await this.extension.retrieveHoldData(this.token.address, this.holdId);
-                      assert.equal(parseInt(this.holdData[4]), holdAmount);
-                    });
-                    it("emits an event", async function() {
-                      const executedAmount = 400
-                      const { logs } = await this.extension.executeHold(this.token.address, this.holdId, executedAmount, EMPTY_BYTE32, { from: notary })
-      
-                      assert.equal(logs[0].event, "HoldExecuted");
-                      assert.equal(logs[0].args.token, this.token.address);
-                      assert.equal(logs[0].args.holdId, this.holdId);
-                      assert.equal(logs[0].args.notary, notary);
-                      assert.equal(logs[0].args.heldValue, holdAmount);
-                      assert.equal(logs[0].args.transferredValue, executedAmount);
-                      assert.equal(logs[0].args.secret, EMPTY_BYTE32);
-                    });
-                  });
-                });
-                describe("when hold shall be kept open", function () {
-                  describe("when value is lower than hold value", function () {
-                    it("executes the hold", async function() {
-                      const initialBalance = await this.token.balanceOf(tokenHolder)
-                      const initialPartitionBalance = await this.token.balanceOfByPartition(partition1, tokenHolder)
-      
-                      const initialBalanceOnHold = await this.extension.balanceOnHold(this.token.address, tokenHolder)
-                      const initialBalanceOnHoldByPartition = await this.extension.balanceOnHoldByPartition(this.token.address, partition1, tokenHolder)
-      
-                      const initialSpendableBalance = await this.extension.spendableBalanceOf(this.token.address, tokenHolder)
-                      const initialSpendableBalanceByPartition = await this.extension.spendableBalanceOfByPartition(this.token.address, partition1, tokenHolder)
-      
-                      const initialTotalSupplyOnHold = await this.extension.totalSupplyOnHold(this.token.address)
-                      const initialTotalSupplyOnHoldByPartition = await this.extension.totalSupplyOnHoldByPartition(this.token.address, partition1)
-      
-                      const initialRecipientBalance = await this.token.balanceOf(recipient)
-                      const initialRecipientPartitionBalance = await this.token.balanceOfByPartition(partition1, recipient)
-  
-                      const executedAmount = 400
-                      await this.extension.executeHoldAndKeepOpen(this.token.address, this.holdId, executedAmount, EMPTY_BYTE32, { from: notary })
-      
-                      const finalBalance = await this.token.balanceOf(tokenHolder)
-                      const finalPartitionBalance = await this.token.balanceOfByPartition(partition1, tokenHolder)
-      
-                      const finalBalanceOnHold = await this.extension.balanceOnHold(this.token.address, tokenHolder)
-                      const finalBalanceOnHoldByPartition = await this.extension.balanceOnHoldByPartition(this.token.address, partition1, tokenHolder)
-      
-                      const finalSpendableBalance = await this.extension.spendableBalanceOf(this.token.address, tokenHolder)
-                      const finalSpendableBalanceByPartition = await this.extension.spendableBalanceOfByPartition(this.token.address, partition1, tokenHolder)
-      
-                      const finalTotalSupplyOnHold = await this.extension.totalSupplyOnHold(this.token.address)
-                      const finalTotalSupplyOnHoldByPartition = await this.extension.totalSupplyOnHoldByPartition(this.token.address, partition1)
-  
-                      const finalRecipientBalance = await this.token.balanceOf(recipient)
-                      const finalRecipientPartitionBalance = await this.token.balanceOfByPartition(partition1, recipient)
-  
-                      assert.equal(initialBalance, issuanceAmount)
-                      assert.equal(finalBalance, issuanceAmount-executedAmount)
-                      assert.equal(initialPartitionBalance, issuanceAmount)
-                      assert.equal(finalPartitionBalance, issuanceAmount-executedAmount)
-      
-                      assert.equal(initialBalanceOnHold, holdAmount)
-                      assert.equal(initialBalanceOnHoldByPartition, holdAmount)
-                      assert.equal(finalBalanceOnHold, holdAmount-executedAmount)
-                      assert.equal(finalBalanceOnHoldByPartition, holdAmount-executedAmount)
-      
-                      assert.equal(initialSpendableBalance, issuanceAmount-holdAmount)
-                      assert.equal(initialSpendableBalanceByPartition, issuanceAmount-holdAmount)
-                      assert.equal(finalSpendableBalance, issuanceAmount-holdAmount)
-                      assert.equal(finalSpendableBalanceByPartition, issuanceAmount-holdAmount)
-      
-                      assert.equal(initialTotalSupplyOnHold, holdAmount)
-                      assert.equal(initialTotalSupplyOnHoldByPartition, holdAmount)
-                      assert.equal(finalTotalSupplyOnHold, holdAmount-executedAmount)
-                      assert.equal(finalTotalSupplyOnHoldByPartition, holdAmount-executedAmount)
-  
-                      assert.equal(initialRecipientBalance, 0)
-                      assert.equal(initialRecipientPartitionBalance, 0)
-                      assert.equal(finalRecipientBalance, executedAmount)
-                      assert.equal(finalRecipientPartitionBalance, executedAmount)
-      
-                      this.holdData = await this.extension.retrieveHoldData(this.token.address, this.holdId);
-                      assert.equal(this.holdData[0], partition1);
-                      assert.equal(this.holdData[1], tokenHolder);
-                      assert.equal(this.holdData[2], recipient);
-                      assert.equal(this.holdData[3], notary);
-                      assert.equal(parseInt(this.holdData[4]), holdAmount-executedAmount);
-                      assert.isAtLeast(parseInt(this.holdData[5]), parseInt(this.time)+SECONDS_IN_AN_HOUR);
-                      assert.isBelow(parseInt(this.holdData[5]), parseInt(this.time)+SECONDS_IN_AN_HOUR+100);
-                      assert.equal(this.holdData[6], this.secretHashPair.hash);
-                      assert.equal(this.holdData[7], EMPTY_BYTE32);
-                      assert.equal(parseInt(this.holdData[8]), HOLD_STATUS_EXECUTED_AND_KEPT_OPEN);
-                    });
-                    it("emits an event", async function() {
-                      const executedAmount = 400
-                      const { logs } = await this.extension.executeHoldAndKeepOpen(this.token.address, this.holdId, executedAmount, EMPTY_BYTE32, { from: notary })
-                      
-                      assert.equal(logs[0].event, "HoldExecutedAndKeptOpen");
-                      assert.equal(logs[0].args.token, this.token.address);
-                      assert.equal(logs[0].args.holdId, this.holdId);
-                      assert.equal(logs[0].args.notary, notary);
-                      assert.equal(logs[0].args.heldValue, holdAmount-executedAmount);
-                      assert.equal(logs[0].args.transferredValue, executedAmount);
-                      assert.equal(logs[0].args.secret, EMPTY_BYTE32);
-                    });
-                  });
-                  describe("when value is equal to hold value", function () {
-                    it("executes the hold", async function() {
-                      const initialPartitionBalance = await this.token.balanceOfByPartition(partition1, tokenHolder)
-                      const initialRecipientPartitionBalance = await this.token.balanceOfByPartition(partition1, recipient)
-
-                      await this.extension.executeHoldAndKeepOpen(this.token.address, this.holdId, holdAmount, EMPTY_BYTE32, { from: notary })
-      
-                      const finalPartitionBalance = await this.token.balanceOfByPartition(partition1, tokenHolder)
-                      const finalRecipientPartitionBalance = await this.token.balanceOfByPartition(partition1, recipient)
-  
-                      assert.equal(initialPartitionBalance, issuanceAmount)
-                      assert.equal(finalPartitionBalance, issuanceAmount-holdAmount)
-      
-                      assert.equal(initialRecipientPartitionBalance, 0)
-                      assert.equal(finalRecipientPartitionBalance, holdAmount)
-                    });
-                    it("emits an event", async function() {
-                      const { logs } = await this.extension.executeHoldAndKeepOpen(this.token.address, this.holdId, holdAmount, EMPTY_BYTE32, { from: notary })
-                      
-                      assert.equal(logs[0].event, "HoldExecuted");
-                      assert.equal(logs[0].args.token, this.token.address);
-                      assert.equal(logs[0].args.holdId, this.holdId);
-                      assert.equal(logs[0].args.notary, notary);
-                      assert.equal(logs[0].args.heldValue, holdAmount);
-                      assert.equal(logs[0].args.transferredValue, holdAmount);
-                      assert.equal(logs[0].args.secret, EMPTY_BYTE32);
-                    });
-                  });
-                });
-              });
-              describe("when value is higher than hold value", function () {
-                it("reverts", async function() {
-                  await expectRevert.unspecified(this.extension.executeHold(this.token.address, this.holdId, holdAmount+1, EMPTY_BYTE32, { from: notary }));
-                });
-              });
-            });
-            describe("when hold is expired", function () {
-              it("reverts", async function () {
-                // Wait for more than an hour
-                await advanceTimeAndBlock(SECONDS_IN_AN_HOUR + 100);
-
-                await expectRevert.unspecified(this.extension.executeHold(this.token.address, this.holdId, holdAmount, EMPTY_BYTE32, { from: notary }));
-              });
-            });
-          });
-          describe("when hold is executed by the secret holder", function () {
-            describe("when the token sender provides the correct secret", function () {
-              it("executes the hold", async function () {
-                const initialPartitionBalance = await this.token.balanceOfByPartition(partition1, tokenHolder)
-                const initialRecipientPartitionBalance = await this.token.balanceOfByPartition(partition1, recipient)
-
-                const { logs } = await this.extension.executeHold(this.token.address, this.holdId, holdAmount, this.secretHashPair.secret, { from: recipient })
-
-                const finalPartitionBalance = await this.token.balanceOfByPartition(partition1, tokenHolder)
-                const finalRecipientPartitionBalance = await this.token.balanceOfByPartition(partition1, recipient)
-
-                assert.equal(initialPartitionBalance, issuanceAmount)
-                assert.equal(finalPartitionBalance, issuanceAmount-holdAmount)
-
-                assert.equal(initialRecipientPartitionBalance, 0)
-                assert.equal(finalRecipientPartitionBalance, holdAmount)
-
-                this.holdData = await this.extension.retrieveHoldData(this.token.address, this.holdId);
-                assert.equal(parseInt(this.holdData[4]), holdAmount);
-
-                assert.equal(logs[0].event, "HoldExecuted");
-                assert.equal(logs[0].args.secret, this.secretHashPair.secret); // HTLC mechanism
-              });
-            });
-            describe("when the token sender doesn't provide the correct secret", function () {
-              it("reverts", async function () {
-                this.fakeSecretHashPair = newSecretHashPair();
-                await expectRevert.unspecified(this.extension.executeHold(this.token.address, this.holdId, holdAmount, this.fakeSecretHashPair.secret, { from: recipient }));
-              });
-            });
-          });
-        });
-        describe("when value is nil", function () {
-          it("reverts", async function () {
-            await expectRevert.unspecified(this.extension.executeHold(this.token.address, this.holdId, 0, EMPTY_BYTE32, { from: notary }));
-          });
-        });
-      });
-      describe("when hold is in status ExecutedAndKeptOpen", function () {
-        it("executes the hold", async function () {
-          this.holdData = await this.extension.retrieveHoldData(this.token.address, this.holdId);
-          assert.equal(parseInt(this.holdData[8]), HOLD_STATUS_ORDERED);
-
-          const partitionBalance1 = await this.token.balanceOfByPartition(partition1, tokenHolder)
-          const recipientPartitionBalance1 = await this.token.balanceOfByPartition(partition1, recipient)
-
-          const executedAmount = 10;
-          await this.extension.executeHoldAndKeepOpen(this.token.address, this.holdId, executedAmount, EMPTY_BYTE32, { from: notary });
-
-          this.holdData = await this.extension.retrieveHoldData(this.token.address, this.holdId);
-          assert.equal(parseInt(this.holdData[8]), HOLD_STATUS_EXECUTED_AND_KEPT_OPEN);
-
-          const partitionBalance2 = await this.token.balanceOfByPartition(partition1, tokenHolder)
-          const recipientPartitionBalance2 = await this.token.balanceOfByPartition(partition1, recipient)
-
-          await this.extension.executeHold(this.token.address, this.holdId, holdAmount-executedAmount, EMPTY_BYTE32, { from: notary })
-
-          const partitionBalance3 = await this.token.balanceOfByPartition(partition1, tokenHolder)
-          const recipientPartitionBalance3 = await this.token.balanceOfByPartition(partition1, recipient)
-
-          assert.equal(partitionBalance1, issuanceAmount)
-          assert.equal(recipientPartitionBalance1, 0)
-
-          assert.equal(partitionBalance2, issuanceAmount-executedAmount)
-          assert.equal(recipientPartitionBalance2, executedAmount)
-
-          assert.equal(partitionBalance3, issuanceAmount-holdAmount)
-          assert.equal(recipientPartitionBalance3, holdAmount)
-        });
-      });
-    });
-    describe("when hold can not be executed", function () {
-      it("reverts", async function () {
-        await this.extension.releaseHold(this.token.address, this.holdId, { from: notary });
-
-        this.holdData = await this.extension.retrieveHoldData(this.token.address, this.holdId);
-        assert.equal(parseInt(this.holdData[8]), HOLD_STATUS_RELEASED_BY_NOTARY);
-
-        await expectRevert.unspecified(this.extension.executeHold(this.token.address, this.holdId, holdAmount, EMPTY_BYTE32, { from: notary }));
-      });
-    });
-  });
-
   // SET TOKEN CONTROLLERS
   describe("setTokenControllers", function () {
     describe("when the caller is the token contract owner", function () {
@@ -8484,570 +6209,4 @@ contract("ERC1400HoldableCertificate with token extension", function ([
       });
     });
   });
-  
-  // PRE-HOLDS
-  describe("pre-hold", function () {
-    beforeEach(async function () {
-      await assertHoldsActivated(
-        this.extension,
-        this.token,
-        true
-      );
-
-      const certificate = await craftCertificate(
-        this.token.contract.methods.issueByPartition(
-          partition1,
-          tokenHolder,
-          issuanceAmount,
-          EMPTY_CERTIFICATE,
-        ).encodeABI(),
-        this.token,
-        this.extension,
-        this.clock, // this.clock
-        controller
-      )
-      await this.token.issueByPartition(
-        partition1,
-        tokenHolder,
-        issuanceAmount,
-        certificate,
-        { from: controller }
-      );
-      
-    });
-
-    describe("when certificate is not activated", function () {
-      beforeEach(async function () {  
-        await setCertificateActivated(
-          this.extension,
-          this.token,
-          controller,
-          CERTIFICATE_VALIDATION_NONE
-        )
-        await assertCertificateActivated(
-          this.extension,
-          this.token,
-          CERTIFICATE_VALIDATION_NONE
-        );
-      });
-      describe("when pre-hold can be created", function () {
-        it("creates a pre-hold", async function () {
-          const initialBalance = await this.token.balanceOf(recipient)
-          const initialPartitionBalance = await this.token.balanceOfByPartition(partition1, recipient)
-  
-          const initialBalanceOnHold = await this.extension.balanceOnHold(this.token.address, recipient)
-          const initialBalanceOnHoldByPartition = await this.extension.balanceOnHoldByPartition(this.token.address, partition1, recipient)
-  
-          const initialSpendableBalance = await this.extension.spendableBalanceOf(this.token.address, recipient)
-          const initialSpendableBalanceByPartition = await this.extension.spendableBalanceOfByPartition(this.token.address, partition1, recipient)
-  
-          const initialTotalSupplyOnHold = await this.extension.totalSupplyOnHold(this.token.address)
-          const initialTotalSupplyOnHoldByPartition = await this.extension.totalSupplyOnHoldByPartition(this.token.address, partition1)
-  
-          const time = await this.clock.getTime();
-          const holdId = newHoldId();
-          const secretHashPair = newSecretHashPair();
-          await this.extension.preHoldFor(
-            this.token.address,
-            holdId,
-            recipient,
-            notary,
-            partition1,
-            holdAmount,
-            SECONDS_IN_AN_HOUR, 
-            secretHashPair.hash,
-            EMPTY_CERTIFICATE,
-            { from: controller }
-          )
-  
-          const finalBalance = await this.token.balanceOf(recipient)
-          const finalPartitionBalance = await this.token.balanceOfByPartition(partition1, recipient)
-  
-          const finalBalanceOnHold = await this.extension.balanceOnHold(this.token.address, recipient)
-          const finalBalanceOnHoldByPartition = await this.extension.balanceOnHoldByPartition(this.token.address, partition1, recipient)
-  
-          const finalSpendableBalance = await this.extension.spendableBalanceOf(this.token.address, recipient)
-          const finalSpendableBalanceByPartition = await this.extension.spendableBalanceOfByPartition(this.token.address, partition1, recipient)
-  
-          const finalTotalSupplyOnHold = await this.extension.totalSupplyOnHold(this.token.address)
-          const finalTotalSupplyOnHoldByPartition = await this.extension.totalSupplyOnHoldByPartition(this.token.address, partition1)
-  
-          assert.equal(initialBalance, 0)
-          assert.equal(finalBalance, 0)
-          assert.equal(initialPartitionBalance, 0)
-          assert.equal(finalPartitionBalance, 0)
-  
-          assert.equal(initialBalanceOnHold, 0)
-          assert.equal(initialBalanceOnHoldByPartition, 0)
-          assert.equal(finalBalanceOnHold, 0)
-          assert.equal(finalBalanceOnHoldByPartition, 0)
-  
-          assert.equal(initialSpendableBalance, 0)
-          assert.equal(initialSpendableBalanceByPartition, 0)
-          assert.equal(finalSpendableBalance, 0)
-          assert.equal(finalSpendableBalanceByPartition, 0)
-  
-          assert.equal(initialTotalSupplyOnHold, 0)
-          assert.equal(initialTotalSupplyOnHoldByPartition, 0)
-          assert.equal(finalTotalSupplyOnHold, 0)
-          assert.equal(finalTotalSupplyOnHoldByPartition, 0)
-  
-          this.holdData = await this.extension.retrieveHoldData(this.token.address, holdId);
-          assert.equal(this.holdData[0], partition1);
-          assert.equal(this.holdData[1], ZERO_ADDRESS);
-          assert.equal(this.holdData[2], recipient);
-          assert.equal(this.holdData[3], notary);
-          assert.equal(parseInt(this.holdData[4]), holdAmount);
-          assert.isAtLeast(parseInt(this.holdData[5]), parseInt(time)+SECONDS_IN_AN_HOUR);
-          assert.isBelow(parseInt(this.holdData[5]), parseInt(time)+SECONDS_IN_AN_HOUR+100);
-          assert.equal(this.holdData[6], secretHashPair.hash);
-          assert.equal(this.holdData[7], EMPTY_BYTE32);
-          assert.equal(parseInt(this.holdData[8]), HOLD_STATUS_ORDERED);
-        });
-        it("emits an event", async function () {
-          const holdId = newHoldId();
-          const secretHashPair = newSecretHashPair();
-          const time = await this.clock.getTime();
-          const { logs } = await this.extension.preHoldFor(
-            this.token.address,
-            holdId,
-            recipient,
-            notary,
-            partition1,
-            holdAmount,
-            SECONDS_IN_AN_HOUR,
-            secretHashPair.hash,
-            EMPTY_CERTIFICATE,
-            { from: controller }
-          )
-  
-          assert.equal(logs[0].event, "HoldCreated");
-          assert.equal(logs[0].args.token, this.token.address);
-          assert.equal(logs[0].args.holdId, holdId);
-          assert.equal(logs[0].args.partition, partition1);
-          assert.equal(logs[0].args.sender, ZERO_ADDRESS);
-          assert.equal(logs[0].args.recipient, recipient);
-          assert.equal(logs[0].args.notary, notary);
-          assert.equal(logs[0].args.value, holdAmount);
-          assert.isAtLeast(parseInt(logs[0].args.expiration), parseInt(time)+SECONDS_IN_AN_HOUR);
-          assert.isBelow(parseInt(logs[0].args.expiration), parseInt(time)+SECONDS_IN_AN_HOUR+100);
-          assert.equal(logs[0].args.secretHash, secretHashPair.hash);
-        });
-        it("creates a pre-hold with expiration time", async function () {
-          const time = parseInt(await this.clock.getTime());
-          const holdId = newHoldId();
-          const secretHashPair = newSecretHashPair();
-          await this.extension.preHoldForWithExpirationDate(
-            this.token.address,
-            holdId,
-            recipient,
-            notary,
-            partition1,
-            holdAmount,
-            time+SECONDS_IN_AN_HOUR,
-            secretHashPair.hash,
-            EMPTY_CERTIFICATE,
-            { from: controller }
-          )
-  
-          this.holdData = await this.extension.retrieveHoldData(this.token.address, holdId);
-          assert.equal(this.holdData[0], partition1);
-          assert.equal(this.holdData[1], ZERO_ADDRESS);
-          assert.equal(this.holdData[2], recipient);
-          assert.equal(this.holdData[3], notary);
-          assert.equal(parseInt(this.holdData[4]), holdAmount);
-          assert.equal(parseInt(this.holdData[5]), time+SECONDS_IN_AN_HOUR);
-          assert.equal(this.holdData[6], secretHashPair.hash);
-          assert.equal(this.holdData[7], EMPTY_BYTE32);
-          assert.equal(parseInt(this.holdData[8]), HOLD_STATUS_ORDERED);
-        });
-        it("creates and releases a pre-hold", async function () {
-          const time = parseInt(await this.clock.getTime());
-          const holdId = newHoldId();
-          const secretHashPair = newSecretHashPair();
-          await this.extension.preHoldForWithExpirationDate(
-            this.token.address,
-            holdId,
-            recipient,
-            notary,
-            partition1,
-            holdAmount,
-            time+SECONDS_IN_AN_HOUR,
-            secretHashPair.hash,
-            EMPTY_CERTIFICATE,
-            { from: controller }
-          )
-          await this.extension.releaseHold(this.token.address, holdId, { from: notary });
-  
-          this.holdData = await this.extension.retrieveHoldData(this.token.address, holdId);
-          assert.equal(this.holdData[0], partition1);
-          assert.equal(this.holdData[1], ZERO_ADDRESS);
-          assert.equal(this.holdData[2], recipient);
-          assert.equal(this.holdData[3], notary);
-          assert.equal(parseInt(this.holdData[4]), holdAmount);
-          assert.equal(parseInt(this.holdData[5]), time+SECONDS_IN_AN_HOUR);
-          assert.equal(this.holdData[6], secretHashPair.hash);
-          assert.equal(this.holdData[7], EMPTY_BYTE32);
-          assert.equal(parseInt(this.holdData[8]), HOLD_STATUS_RELEASED_BY_NOTARY);
-        });
-        it("creates and renews a pre-hold", async function () {
-          const time = parseInt(await this.clock.getTime());
-          const holdId = newHoldId();
-          const secretHashPair = newSecretHashPair();
-          await this.extension.preHoldForWithExpirationDate(
-            this.token.address,
-            holdId,
-            recipient,
-            notary,
-            partition1,
-            holdAmount,
-            time+SECONDS_IN_AN_HOUR,
-            secretHashPair.hash,
-            EMPTY_CERTIFICATE,
-            { from: controller }
-          )
-          await this.extension.renewHold(
-            this.token.address,
-            holdId,
-            SECONDS_IN_A_DAY,
-            EMPTY_CERTIFICATE,
-            { from: controller }
-          );
-  
-          this.holdData = await this.extension.retrieveHoldData(this.token.address, holdId);
-          assert.equal(this.holdData[0], partition1);
-          assert.equal(this.holdData[1], ZERO_ADDRESS);
-          assert.equal(this.holdData[2], recipient);
-          assert.equal(this.holdData[3], notary);
-          assert.equal(parseInt(this.holdData[4]), holdAmount);
-          assert.isAtLeast(parseInt(this.holdData[5]), time+SECONDS_IN_A_DAY-2);
-          assert.isBelow(parseInt(this.holdData[5]), time+SECONDS_IN_A_DAY+100);
-          assert.equal(this.holdData[6], secretHashPair.hash);
-          assert.equal(this.holdData[7], EMPTY_BYTE32);
-          assert.equal(parseInt(this.holdData[8]), HOLD_STATUS_ORDERED);
-        });
-        it("creates a pre-hold and fails renewing it", async function () {
-          const time = parseInt(await this.clock.getTime());
-          const holdId = newHoldId();
-          const secretHashPair = newSecretHashPair();
-          await this.extension.preHoldForWithExpirationDate(
-            this.token.address,
-            holdId,
-            recipient,
-            notary,
-            partition1,
-            holdAmount,
-            time+SECONDS_IN_AN_HOUR,
-            secretHashPair.hash,
-            EMPTY_CERTIFICATE,
-            { from: controller }
-          )
-          await expectRevert.unspecified(
-            this.extension.renewHold(
-              this.token.address,
-              holdId,
-              SECONDS_IN_A_DAY,
-              EMPTY_CERTIFICATE,
-              { from: recipient }
-            )
-          );
-        });
-        it("creates and executes pre-hold", async function () {
-          const initialBalance = await this.token.balanceOf(recipient)
-          const initialPartitionBalance = await this.token.balanceOfByPartition(partition1, recipient)
-  
-          const initialBalanceOnHold = await this.extension.balanceOnHold(this.token.address, recipient)
-          const initialBalanceOnHoldByPartition = await this.extension.balanceOnHoldByPartition(this.token.address, partition1, recipient)
-  
-          const initialSpendableBalance = await this.extension.spendableBalanceOf(this.token.address, recipient)
-          const initialSpendableBalanceByPartition = await this.extension.spendableBalanceOfByPartition(this.token.address, partition1, recipient)
-  
-          const initialTotalSupplyOnHold = await this.extension.totalSupplyOnHold(this.token.address)
-          const initialTotalSupplyOnHoldByPartition = await this.extension.totalSupplyOnHoldByPartition(this.token.address, partition1)
-  
-          const time = await this.clock.getTime();
-          const holdId = newHoldId();
-          const secretHashPair = newSecretHashPair();
-          await this.extension.preHoldFor(
-            this.token.address,
-            holdId,
-            recipient,
-            notary,
-            partition1,
-            holdAmount,
-            SECONDS_IN_AN_HOUR,
-            secretHashPair.hash,
-            EMPTY_CERTIFICATE,
-            { from: controller }
-          )
-          await this.extension.addAllowlisted(this.token.address, recipient, { from: controller });
-          await this.extension.executeHold(this.token.address, holdId, holdAmount, secretHashPair.secret, { from: recipient })
-  
-          const finalBalance = await this.token.balanceOf(recipient)
-          const finalPartitionBalance = await this.token.balanceOfByPartition(partition1, recipient)
-  
-          const finalBalanceOnHold = await this.extension.balanceOnHold(this.token.address, recipient)
-          const finalBalanceOnHoldByPartition = await this.extension.balanceOnHoldByPartition(this.token.address, partition1, recipient)
-  
-          const finalSpendableBalance = await this.extension.spendableBalanceOf(this.token.address, recipient)
-          const finalSpendableBalanceByPartition = await this.extension.spendableBalanceOfByPartition(this.token.address, partition1, recipient)
-  
-          const finalTotalSupplyOnHold = await this.extension.totalSupplyOnHold(this.token.address)
-          const finalTotalSupplyOnHoldByPartition = await this.extension.totalSupplyOnHoldByPartition(this.token.address, partition1)
-  
-          assert.equal(initialBalance, 0)
-          assert.equal(finalBalance, holdAmount)
-          assert.equal(initialPartitionBalance, 0)
-          assert.equal(finalPartitionBalance, holdAmount)
-  
-          assert.equal(initialBalanceOnHold, 0)
-          assert.equal(initialBalanceOnHoldByPartition, 0)
-          assert.equal(finalBalanceOnHold, 0)
-          assert.equal(finalBalanceOnHoldByPartition, 0)
-  
-          assert.equal(initialSpendableBalance, 0)
-          assert.equal(initialSpendableBalanceByPartition, 0)
-          assert.equal(finalSpendableBalance, holdAmount)
-          assert.equal(finalSpendableBalanceByPartition, holdAmount)
-  
-          assert.equal(initialTotalSupplyOnHold, 0)
-          assert.equal(initialTotalSupplyOnHoldByPartition, 0)
-          assert.equal(finalTotalSupplyOnHold, 0)
-          assert.equal(finalTotalSupplyOnHoldByPartition, 0)
-  
-          this.holdData = await this.extension.retrieveHoldData(this.token.address, holdId);
-          assert.equal(this.holdData[0], partition1);
-          assert.equal(this.holdData[1], ZERO_ADDRESS);
-          assert.equal(this.holdData[2], recipient);
-          assert.equal(this.holdData[3], notary);
-          assert.equal(parseInt(this.holdData[4]), holdAmount);
-          assert.isAtLeast(parseInt(this.holdData[5]), parseInt(time)+SECONDS_IN_AN_HOUR);
-          assert.isBelow(parseInt(this.holdData[5]), parseInt(time)+SECONDS_IN_AN_HOUR+100);
-          assert.equal(this.holdData[6], secretHashPair.hash);
-          assert.equal(this.holdData[7], secretHashPair.secret);
-          assert.equal(parseInt(this.holdData[8]), HOLD_STATUS_EXECUTED);
-        });
-        it("creates and executes pre-hold in 2 times", async function () {
-          const initialBalance = await this.token.balanceOf(recipient)
-  
-          const time = await this.clock.getTime();
-          const holdId = newHoldId();
-          const secretHashPair = newSecretHashPair();
-          await this.extension.preHoldFor(
-            this.token.address,
-            holdId,
-            recipient,
-            notary,
-            partition1,
-            holdAmount,
-            SECONDS_IN_AN_HOUR,
-            secretHashPair.hash,
-            EMPTY_CERTIFICATE,
-            { from: controller }
-          )
-          await this.extension.addAllowlisted(this.token.address, recipient, { from: controller });
-          await this.extension.executeHoldAndKeepOpen(this.token.address, holdId, holdAmount-100, secretHashPair.secret, { from: recipient })
-  
-          const intermediateBalance = await this.token.balanceOf(recipient)
-  
-          this.holdData = await this.extension.retrieveHoldData(this.token.address, holdId);
-          assert.equal(this.holdData[0], partition1);
-          assert.equal(this.holdData[1], ZERO_ADDRESS);
-          assert.equal(this.holdData[2], recipient);
-          assert.equal(this.holdData[3], notary);
-          assert.equal(parseInt(this.holdData[4]), 100);
-          assert.isAtLeast(parseInt(this.holdData[5]), parseInt(time)+SECONDS_IN_AN_HOUR);
-          assert.isBelow(parseInt(this.holdData[5]), parseInt(time)+SECONDS_IN_AN_HOUR+100);
-          assert.equal(this.holdData[6], secretHashPair.hash);
-          assert.equal(this.holdData[7], secretHashPair.secret);
-          assert.equal(parseInt(this.holdData[8]), HOLD_STATUS_EXECUTED_AND_KEPT_OPEN);
-  
-          await this.extension.executeHold(this.token.address, holdId, 100, secretHashPair.secret, { from: recipient })
-  
-          const finalBalance = await this.token.balanceOf(recipient)
-          
-          assert.equal(initialBalance, 0)
-          assert.equal(intermediateBalance, holdAmount-100)
-          assert.equal(finalBalance, holdAmount)
-  
-          this.holdData = await this.extension.retrieveHoldData(this.token.address, holdId);
-          assert.equal(this.holdData[0], partition1);
-          assert.equal(this.holdData[1], ZERO_ADDRESS);
-          assert.equal(this.holdData[2], recipient);
-          assert.equal(this.holdData[3], notary);
-          assert.equal(parseInt(this.holdData[4]), 100);
-          assert.isAtLeast(parseInt(this.holdData[5]), parseInt(time)+SECONDS_IN_AN_HOUR);
-          assert.isBelow(parseInt(this.holdData[5]), parseInt(time)+SECONDS_IN_AN_HOUR+100);
-          assert.equal(this.holdData[6], secretHashPair.hash);
-          assert.equal(this.holdData[7], secretHashPair.secret);
-          assert.equal(parseInt(this.holdData[8]), HOLD_STATUS_EXECUTED);
-        });
-      });
-      describe("when pre-hold can not be created", function () {
-        describe("when expiration date is not valid", function () {
-          it("reverts", async function () {
-            const time = parseInt(await this.clock.getTime());
-            const holdId = newHoldId();
-            const secretHashPair = newSecretHashPair();
-            await expectRevert.unspecified(
-              this.extension.preHoldForWithExpirationDate(
-                this.token.address,
-                holdId,
-                recipient,
-                notary,
-                partition1,
-                holdAmount,
-                time-1, 
-                secretHashPair.hash,
-                EMPTY_CERTIFICATE,
-                { from: controller }
-              )
-            )
-          });
-        });
-        describe("when caller is not a minter", function () {
-          it("reverts", async function () {
-            const holdId = newHoldId();
-            const secretHashPair = newSecretHashPair();
-            await expectRevert.unspecified(
-              this.extension.preHoldFor(
-                this.token.address,
-                holdId,
-                recipient,
-                notary,
-                partition1,
-                holdAmount,
-                SECONDS_IN_AN_HOUR,
-                secretHashPair.hash,
-                EMPTY_CERTIFICATE,
-                { from: notary }
-              )
-            );
-          });
-        });
-      });
-    });
-    describe("when certificate is activated", function () {
-      beforeEach(async function () {
-        await assertCertificateActivated(
-          this.extension,
-          this.token,
-          CERTIFICATE_VALIDATION_SALT
-        );
-      });
-      describe("when certificate is valid", function () {
-        it("creates a pre-hold", async function () {
-          const initialBalance = await this.token.balanceOf(recipient)
-          const initialPartitionBalance = await this.token.balanceOfByPartition(partition1, recipient)
-  
-          const initialBalanceOnHold = await this.extension.balanceOnHold(this.token.address, recipient)
-          const initialBalanceOnHoldByPartition = await this.extension.balanceOnHoldByPartition(this.token.address, partition1, recipient)
-  
-          const initialSpendableBalance = await this.extension.spendableBalanceOf(this.token.address, recipient)
-          const initialSpendableBalanceByPartition = await this.extension.spendableBalanceOfByPartition(this.token.address, partition1, recipient)
-  
-          const initialTotalSupplyOnHold = await this.extension.totalSupplyOnHold(this.token.address)
-          const initialTotalSupplyOnHoldByPartition = await this.extension.totalSupplyOnHoldByPartition(this.token.address, partition1)
-  
-          const time = await this.clock.getTime();
-          const holdId = newHoldId();
-          const secretHashPair = newSecretHashPair();
-          const certificate = await craftCertificate(
-            this.extension.contract.methods.preHoldFor(
-              this.token.address,
-              holdId,
-              recipient,
-              notary,
-              partition1,
-              holdAmount,
-              SECONDS_IN_AN_HOUR, 
-              secretHashPair.hash,
-              EMPTY_CERTIFICATE,
-            ).encodeABI(),
-            this.token,
-            this.extension,
-            this.clock, // this.clock
-            controller
-          )
-          await this.extension.preHoldFor(
-            this.token.address,
-            holdId,
-            recipient,
-            notary,
-            partition1,
-            holdAmount,
-            SECONDS_IN_AN_HOUR, 
-            secretHashPair.hash,
-            certificate,
-            { from: controller }
-          )
-  
-          const finalBalance = await this.token.balanceOf(recipient)
-          const finalPartitionBalance = await this.token.balanceOfByPartition(partition1, recipient)
-  
-          const finalBalanceOnHold = await this.extension.balanceOnHold(this.token.address, recipient)
-          const finalBalanceOnHoldByPartition = await this.extension.balanceOnHoldByPartition(this.token.address, partition1, recipient)
-  
-          const finalSpendableBalance = await this.extension.spendableBalanceOf(this.token.address, recipient)
-          const finalSpendableBalanceByPartition = await this.extension.spendableBalanceOfByPartition(this.token.address, partition1, recipient)
-  
-          const finalTotalSupplyOnHold = await this.extension.totalSupplyOnHold(this.token.address)
-          const finalTotalSupplyOnHoldByPartition = await this.extension.totalSupplyOnHoldByPartition(this.token.address, partition1)
-  
-          assert.equal(initialBalance, 0)
-          assert.equal(finalBalance, 0)
-          assert.equal(initialPartitionBalance, 0)
-          assert.equal(finalPartitionBalance, 0)
-  
-          assert.equal(initialBalanceOnHold, 0)
-          assert.equal(initialBalanceOnHoldByPartition, 0)
-          assert.equal(finalBalanceOnHold, 0)
-          assert.equal(finalBalanceOnHoldByPartition, 0)
-  
-          assert.equal(initialSpendableBalance, 0)
-          assert.equal(initialSpendableBalanceByPartition, 0)
-          assert.equal(finalSpendableBalance, 0)
-          assert.equal(finalSpendableBalanceByPartition, 0)
-  
-          assert.equal(initialTotalSupplyOnHold, 0)
-          assert.equal(initialTotalSupplyOnHoldByPartition, 0)
-          assert.equal(finalTotalSupplyOnHold, 0)
-          assert.equal(finalTotalSupplyOnHoldByPartition, 0)
-  
-          this.holdData = await this.extension.retrieveHoldData(this.token.address, holdId);
-          assert.equal(this.holdData[0], partition1);
-          assert.equal(this.holdData[1], ZERO_ADDRESS);
-          assert.equal(this.holdData[2], recipient);
-          assert.equal(this.holdData[3], notary);
-          assert.equal(parseInt(this.holdData[4]), holdAmount);
-          assert.isAtLeast(parseInt(this.holdData[5]), parseInt(time)+SECONDS_IN_AN_HOUR);
-          assert.isBelow(parseInt(this.holdData[5]), parseInt(time)+SECONDS_IN_AN_HOUR+100);
-          assert.equal(this.holdData[6], secretHashPair.hash);
-          assert.equal(this.holdData[7], EMPTY_BYTE32);
-          assert.equal(parseInt(this.holdData[8]), HOLD_STATUS_ORDERED);
-        });
-      });
-      describe("when certificate is not valid", function () {
-        it("creates a pre-hold", async function () {
-          const holdId = newHoldId();
-          const secretHashPair = newSecretHashPair();
-          await expectRevert.unspecified(
-            this.extension.preHoldFor(
-              this.token.address,
-              holdId,
-              recipient,
-              notary,
-              partition1,
-              holdAmount,
-              SECONDS_IN_AN_HOUR, 
-              secretHashPair.hash,
-              EMPTY_CERTIFICATE,
-              { from: controller }
-            )
-          )
-        });
-      });
-    });
-  });
-
 });
